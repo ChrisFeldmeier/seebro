@@ -1,0 +1,20 @@
+#!/bin/sh
+# Pre-commit hook: format, vet, test
+
+set -e
+
+echo "🪼 pre-commit: gofmt..."
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  echo "Files not formatted (run 'gofmt -w .'):"
+  echo "$unformatted"
+  exit 1
+fi
+
+echo "🪼 pre-commit: go vet..."
+go vet ./...
+
+echo "🪼 pre-commit: go test..."
+go test ./... -count=1 -timeout=30s
+
+echo "🪼 All checks passed."

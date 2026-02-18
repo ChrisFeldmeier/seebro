@@ -1,0 +1,29 @@
+# Binaries
+seebro
+browser-bridge
+
+# Test coverage
+coverage.out
+*.test
+
+# Git
+.git/
+.github/
+
+# Local state
+.seebro/
+.openclaw/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+*.swp
+
+# Docs
+docs/
+
+# Development
+node_modules/
+*.log

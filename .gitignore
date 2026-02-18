@@ -1,0 +1,16 @@
+node_modules/
+browser-bridge
+seebro
+coverage.out
+
+# OpenClaw workspace files (should never be committed)
+.openclaw/
+SOUL.md
+HEARTBEAT.md
+IDENTITY.md
+USER.md
+BOOTSTRAP.md
+TOOLS.md
+MEMORY.md
+.openclaw/
+AGENTS.md
