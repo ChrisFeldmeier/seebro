@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  seebro:
+    build: .
+    container_name: seebro
+    ports:
+      - "9867:9867"
+    volumes:
+      - seebro-data:/data
+    environment:
+      - BRIDGE_PORT=9867
+      - BRIDGE_HEADLESS=true
+      - BRIDGE_TOKEN=${SEEBRO_TOKEN:-}
+    restart: unless-stopped
+    # Required for Chrome to work in container
+    security_opt:
+      - seccomp:unconfined
+    # Limit resources
+    mem_limit: 2g
+    cpus: '2.0'
+
+volumes:
+  seebro-data:
