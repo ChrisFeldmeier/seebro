@@ -68,7 +68,9 @@ type goalUsage struct {
 	Calls        int     `json:"decider_calls"`
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
-	EstCostUSD   float64 `json:"est_cost_usd"`
+	EstCostUSD   float64 `json:"est_cost_usd"` // billed cost where reported, else input tokens × list price
+
+	billed, estimated float64
 }
 
 type goalResult struct {
@@ -667,7 +669,12 @@ func (u *goalUsage) add(x jevUsage) {
 	u.Calls++
 	u.InputTokens += x.InputTokens
 	u.OutputTokens += x.OutputTokens
-	u.EstCostUSD = float64(u.InputTokens) / 1e6 * jevPricePerMTokIn
+	if x.CostUSD > 0 { // billed by the provider
+		u.billed += x.CostUSD
+	} else {
+		u.estimated += float64(x.InputTokens) / 1e6 * jevPricePerMTokIn
+	}
+	u.EstCostUSD = u.billed + u.estimated
 }
 
 func errorStatus(ctx context.Context, err error) (string, string) {

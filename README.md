@@ -157,6 +157,8 @@ The run stops on Cloudflare challenge or block pages (`status: "blocked"` with e
 | Search "Ristretto" | 1,939 ms | **1,640 ms** | 1,610 ms |
 | Coffee → Espresso → Ristretto | 4,215 ms | **3,184 ms** | 2,652 ms |
 
+With the real Jev model (Vercel AI Gateway) Seebro solved all of these open tasks without help, each in one call: Espresso → inventor's article (2.6 s, 2 steps), Hacker News "newest" (3.4 s), Vercel pricing page (3.0 s, $0.0004 billed), go.dev → github.com/golang/go (8.6 s, 3 steps), python.org → "Using Python on macOS" docs (9.0 s, 7 steps), Wikipedia search for Mount Everest (2 steps).
+
 The browser side of `/goal` is 1.1–1.3× faster than jev-browser. The real gain is in the agent: a three-hop navigation is **one tool call** instead of about nine, and none of the intermediate pages pass through the large model's context.
 
 The loop design, the questions and the bot-wall detector are ported from [jev-browser](https://github.com/jkudish/jev-browser) (MIT, © Joey Kudish).

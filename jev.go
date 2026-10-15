@@ -44,8 +44,9 @@ type jevAnswer struct {
 }
 
 type jevUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	CostUSD      float64 `json:"-"` // billed cost when the provider reports it (Vercel)
 }
 
 // decider answers a set of questions about a state. The Jev HTTP client is
@@ -301,6 +302,9 @@ func parseVercelReply(data []byte) (map[string]jevAnswer, jevUsage, error) {
 			Typesafe struct {
 				Confidence map[string]float64 `json:"confidence"`
 			} `json:"typesafe"`
+			Gateway struct {
+				Cost string `json:"cost"`
+			} `json:"gateway"`
 		} `json:"providerMetadata"`
 	}
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -319,7 +323,8 @@ func parseVercelReply(data []byte) (map[string]jevAnswer, jevUsage, error) {
 			out[id] = jevAnswer{Type: a.Type, Choice: a.Choice, Probabilities: a.Probabilities, Confidence: conf}
 		}
 	}
-	return out, jevUsage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}, nil
+	cost, _ := strconv.ParseFloat(r.ProviderMetadata.Gateway.Cost, 64)
+	return out, jevUsage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens, CostUSD: cost}, nil
 }
 
 // gatewayError surfaces the gateway's own error message (e.g. "Free tier

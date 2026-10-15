@@ -432,7 +432,7 @@ func TestJevClientVercel(t *testing.T) {
 			"goal_done":{"type":"boolean","probability":0.9},
 			"stuck":{"type":"boolean","probability":0.05}},
 			"usage":{"inputTokens":640,"outputTokens":0},
-			"providerMetadata":{"typesafe":{"confidence":{"action":0.8}}}}`))
+			"providerMetadata":{"typesafe":{"confidence":{"action":0.8}},"gateway":{"cost":"0.000031"}}}`))
 	}))
 	defer srv.Close()
 	t.Setenv("TYPESAFE_API_KEY", "")
@@ -453,6 +453,15 @@ func TestJevClientVercel(t *testing.T) {
 	}
 	if a["action"].Choice != "done" || *a["action"].Confidence != 0.8 || *a["goal_done"].Noul != 0.9 || a["goal_done"].Type != "noul" || u.InputTokens != 640 {
 		t.Errorf("answers %+v usage %+v", a, u)
+	}
+	if u.CostUSD != 0.000031 {
+		t.Errorf("billed cost %v", u.CostUSD)
+	}
+	var gu goalUsage
+	gu.add(u)
+	gu.add(jevUsage{InputTokens: 1e6})
+	if d := gu.EstCostUSD - (0.000031 + jevPricePerMTokIn); d > 1e-12 || d < -1e-12 {
+		t.Errorf("billed + estimated cost %v", gu.EstCostUSD)
 	}
 	c.url = srv.URL + "?fail=1"
 	if _, _, err := c.Decide(context.Background(), map[string]any{}, stepQuestions(map[string]string{"done": "stop"})); err == nil || !strings.Contains(err.Error(), "Free tier") {
