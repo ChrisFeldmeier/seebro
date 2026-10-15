@@ -146,6 +146,7 @@ The run stops on Cloudflare challenge or block pages (`status: "blocked"` with e
 |---|---|
 | `TYPESAFE_API_KEY` | TypeSafe API (`TYPESAFE_BASE_URL` to override the endpoint) |
 | `OPENROUTER_API_KEY` | OpenRouter decisions API (`sk-or-…`) |
+| `AI_GATEWAY_API_KEY` | Vercel AI Gateway (`vck_…`, model `typesafe-ai/jev`; needs paid gateway credits, free tier is refused) |
 | `JEV_PROVIDER`, `JEV_MODEL` | Force a provider; pick a model snapshot (default `jev-latest`) |
 
 **Measured** (Wikipedia, same decisions for every contestant, median of 3, same machine and Chrome):

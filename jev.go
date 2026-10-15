@@ -124,10 +124,10 @@ func validateAnswers(questions map[string]jevQuestion, answers map[string]jevAns
 	return nil
 }
 
-// ── HTTP client (TypeSafe / OpenRouter) ────────────────────
+// ── HTTP client (TypeSafe / OpenRouter / Vercel AI Gateway) ─
 
 type jevClient struct {
-	provider string // "typesafe" or "openrouter"
+	provider string // "typesafe", "openrouter" or "vercel"
 	url      string
 	key      string
 	model    string
@@ -135,14 +135,15 @@ type jevClient struct {
 }
 
 // newJevClient picks the provider from the environment: TYPESAFE_API_KEY
-// (TYPESAFE_BASE_URL overrides the endpoint) or OPENROUTER_API_KEY.
-// JEV_PROVIDER forces one when both are set; JEV_MODEL picks the snapshot.
+// (TYPESAFE_BASE_URL overrides the endpoint), OPENROUTER_API_KEY or
+// AI_GATEWAY_API_KEY (Vercel). JEV_PROVIDER forces one when several are
+// set; JEV_MODEL picks the snapshot.
 func newJevClient(model string) (*jevClient, error) {
 	if model == "" {
 		model = envOr("JEV_MODEL", "jev-latest")
 	}
 	c := &jevClient{model: model, http: &http.Client{Timeout: 30 * time.Second}}
-	ts, or := os.Getenv("TYPESAFE_API_KEY"), os.Getenv("OPENROUTER_API_KEY")
+	ts, or, gw := os.Getenv("TYPESAFE_API_KEY"), os.Getenv("OPENROUTER_API_KEY"), os.Getenv("AI_GATEWAY_API_KEY")
 	provider := os.Getenv("JEV_PROVIDER")
 	if provider == "" {
 		switch {
@@ -150,8 +151,10 @@ func newJevClient(model string) (*jevClient, error) {
 			provider = "typesafe"
 		case strings.HasPrefix(or, "sk-or-"):
 			provider = "openrouter"
+		case gw != "":
+			provider = "vercel"
 		default:
-			return nil, fmt.Errorf("no Jev key: set TYPESAFE_API_KEY (typesafe.ai) or OPENROUTER_API_KEY, or use decider=local")
+			return nil, fmt.Errorf("no Jev key: set TYPESAFE_API_KEY (typesafe.ai), OPENROUTER_API_KEY or AI_GATEWAY_API_KEY (Vercel), or use decider=local")
 		}
 	}
 	switch provider {
@@ -168,8 +171,17 @@ func newJevClient(model string) (*jevClient, error) {
 		c.provider, c.key = provider, or
 		c.url = envOr("OPENROUTER_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions")
 		c.model = openrouterJevModel(c.model)
+	case "vercel":
+		if gw == "" {
+			return nil, fmt.Errorf("AI_GATEWAY_API_KEY is not set")
+		}
+		c.provider, c.key = provider, gw
+		c.url = envOr("AI_GATEWAY_EVALUATION_URL", "https://ai-gateway.vercel.sh/v4/ai/evaluation-model")
+		if !strings.HasPrefix(c.model, "typesafe-ai/") {
+			c.model = "typesafe-ai/jev"
+		}
 	default:
-		return nil, fmt.Errorf("JEV_PROVIDER must be typesafe or openrouter")
+		return nil, fmt.Errorf("JEV_PROVIDER must be typesafe, openrouter or vercel")
 	}
 	return c, nil
 }
@@ -187,7 +199,12 @@ func openrouterJevModel(m string) string {
 func (c *jevClient) Name() string { return c.provider + ":" + c.model }
 
 func (c *jevClient) Decide(ctx context.Context, state any, questions map[string]jevQuestion) (map[string]jevAnswer, jevUsage, error) {
-	body, _ := json.Marshal(map[string]any{"state": state, "questions": questions, "model": c.model})
+	var body []byte
+	if c.provider == "vercel" {
+		body = vercelRequest(state, questions)
+	} else {
+		body, _ = json.Marshal(map[string]any{"state": state, "questions": questions, "model": c.model})
+	}
 	var reply struct {
 		Answers map[string]jevAnswer `json:"answers"`
 		Usage   *jevUsage            `json:"usage"`
@@ -202,9 +219,15 @@ func (c *jevClient) Decide(ctx context.Context, state any, questions map[string]
 		req.Header.Set("Authorization", "Bearer "+c.key)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
-		if c.provider == "openrouter" {
+		switch c.provider {
+		case "openrouter":
 			req.Header.Set("HTTP-Referer", "https://github.com/ChrisFeldmeier/seebro")
 			req.Header.Set("X-Title", "seebro")
+		case "vercel":
+			req.Header.Set("ai-gateway-protocol-version", "0.0.1")
+			req.Header.Set("ai-gateway-auth-method", "api-key")
+			req.Header.Set("ai-evaluation-model-specification-version", "4")
+			req.Header.Set("ai-model-id", c.model)
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -224,9 +247,15 @@ func (c *jevClient) Decide(ctx context.Context, state any, questions map[string]
 			}
 		}
 		if resp.StatusCode >= 300 {
-			return nil, jevUsage{}, fmt.Errorf("%s HTTP %d (response omitted)", c.provider, resp.StatusCode)
+			return nil, jevUsage{}, fmt.Errorf("%s HTTP %d%s", c.provider, resp.StatusCode, gatewayError(c.provider, data))
 		}
-		if err := json.Unmarshal(data, &reply); err != nil {
+		if c.provider == "vercel" {
+			a, u, err := parseVercelReply(data)
+			if err != nil {
+				return nil, jevUsage{}, err
+			}
+			reply.Answers, reply.Usage = a, &u
+		} else if err := json.Unmarshal(data, &reply); err != nil {
 			return nil, jevUsage{}, fmt.Errorf("%s: invalid JSON (%d bytes)", c.provider, len(data))
 		}
 		break
@@ -239,6 +268,76 @@ func (c *jevClient) Decide(ctx context.Context, state any, questions map[string]
 		u = *reply.Usage
 	}
 	return reply.Answers, u, nil
+}
+
+// The Vercel AI Gateway's evaluation-model API speaks the same questions
+// with "boolean" in place of "noul" and returns AI SDK-style answers.
+
+func vercelRequest(state any, questions map[string]jevQuestion) []byte {
+	qs := make(map[string]jevQuestion, len(questions))
+	for k, q := range questions {
+		if q.Type == "noul" {
+			q.Type = "boolean"
+		}
+		qs[k] = q
+	}
+	body, _ := json.Marshal(map[string]any{"state": state, "questions": qs})
+	return body
+}
+
+func parseVercelReply(data []byte) (map[string]jevAnswer, jevUsage, error) {
+	var r struct {
+		Answers map[string]struct {
+			Type          string             `json:"type"`
+			Choice        string             `json:"choice"`
+			Probabilities map[string]float64 `json:"probabilities"`
+			Probability   *float64           `json:"probability"`
+		} `json:"answers"`
+		Usage struct {
+			InputTokens  int `json:"inputTokens"`
+			OutputTokens int `json:"outputTokens"`
+		} `json:"usage"`
+		ProviderMetadata struct {
+			Typesafe struct {
+				Confidence map[string]float64 `json:"confidence"`
+			} `json:"typesafe"`
+		} `json:"providerMetadata"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, jevUsage{}, fmt.Errorf("vercel: invalid JSON (%d bytes)", len(data))
+	}
+	out := make(map[string]jevAnswer, len(r.Answers))
+	for id, a := range r.Answers {
+		var conf *float64
+		if c, ok := r.ProviderMetadata.Typesafe.Confidence[id]; ok {
+			conf = &c
+		}
+		switch a.Type {
+		case "boolean":
+			out[id] = jevAnswer{Type: "noul", Noul: a.Probability}
+		default:
+			out[id] = jevAnswer{Type: a.Type, Choice: a.Choice, Probabilities: a.Probabilities, Confidence: conf}
+		}
+	}
+	return out, jevUsage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}, nil
+}
+
+// gatewayError surfaces the gateway's own error message (e.g. "Free tier
+// users do not have access to this model"): it names the fix and carries no
+// secret. Other providers' bodies stay omitted.
+func gatewayError(provider string, data []byte) string {
+	if provider != "vercel" {
+		return " (response omitted)"
+	}
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(data, &e) != nil || e.Error.Message == "" {
+		return " (response omitted)"
+	}
+	return ": " + truncateRunes(e.Error.Message, 200)
 }
 
 func retryableStatus(s int) bool { return s == 408 || s == 409 || s == 429 || s >= 500 }

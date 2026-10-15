@@ -16,7 +16,7 @@
 
 ### Goal navigation (Jev)
 - `POST /goal` and MCP `navigate_goal`: a whole multi-step navigation in one call. Each step: Seebro snapshot → action space (`click_`, `search_`, `type_`/`submit_`, `select_`, scroll/back/done) → one decider call (action, goal reached, stuck) → stop gates before acting → execute, settle, record the outcome
-- Deciders: Jev via TypeSafe (`TYPESAFE_API_KEY`) or OpenRouter (`OPENROUTER_API_KEY`) with retry/backoff and answer validation; `local` offline keyword matcher
+- Deciders: Jev via TypeSafe (`TYPESAFE_API_KEY`), OpenRouter (`OPENROUTER_API_KEY`) or the Vercel AI Gateway (`AI_GATEWAY_API_KEY`, evaluation-model API; the gateway's error message is passed through) with retry/backoff and answer validation; `local` offline keyword matcher
 - Relevance-aware element cap (task matches survive the 240-option limit), next-best recovery for repeated no-op actions, dropdown second-stage question, typing only from `query`/`inputs`
 - Search boxes: real key events, falling back to form submission for fields a collapsed header hides
 - Cloudflare challenge/block detection stops the run with evidence and guidance

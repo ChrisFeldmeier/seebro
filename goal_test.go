@@ -411,7 +411,57 @@ func TestJevClientWire(t *testing.T) {
 	}
 }
 
+func TestJevClientVercel(t *testing.T) {
+	var gotBool, gotHeaders bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Get("ai-model-id") == "typesafe-ai/jev" && r.Header.Get("ai-evaluation-model-specification-version") == "4" &&
+			r.Header.Get("Authorization") == "Bearer vck_test"
+		var body struct {
+			Questions map[string]jevQuestion `json:"questions"`
+			Model     *string                `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotBool = body.Questions["goal_done"].Type == "boolean" && body.Model == nil
+		if r.URL.Query().Get("fail") != "" {
+			w.WriteHeader(403)
+			_, _ = w.Write([]byte(`{"error":{"message":"Free tier users do not have access to this model."}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"answers":{
+			"action":{"type":"choice","choice":"done","probabilities":{"done":0.7,"back":0.3}},
+			"goal_done":{"type":"boolean","probability":0.9},
+			"stuck":{"type":"boolean","probability":0.05}},
+			"usage":{"inputTokens":640,"outputTokens":0},
+			"providerMetadata":{"typesafe":{"confidence":{"action":0.8}}}}`))
+	}))
+	defer srv.Close()
+	t.Setenv("TYPESAFE_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("JEV_PROVIDER", "")
+	t.Setenv("AI_GATEWAY_API_KEY", "vck_test")
+	t.Setenv("AI_GATEWAY_EVALUATION_URL", srv.URL)
+	c, err := newJevClient("")
+	if err != nil || c.provider != "vercel" || c.model != "typesafe-ai/jev" {
+		t.Fatalf("client %+v %v", c, err)
+	}
+	a, u, err := c.Decide(context.Background(), map[string]any{"task": "x"}, stepQuestions(map[string]string{"done": "stop", "back": "back"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotHeaders || !gotBool {
+		t.Errorf("wire format: headers %v boolean questions %v", gotHeaders, gotBool)
+	}
+	if a["action"].Choice != "done" || *a["action"].Confidence != 0.8 || *a["goal_done"].Noul != 0.9 || a["goal_done"].Type != "noul" || u.InputTokens != 640 {
+		t.Errorf("answers %+v usage %+v", a, u)
+	}
+	c.url = srv.URL + "?fail=1"
+	if _, _, err := c.Decide(context.Background(), map[string]any{}, stepQuestions(map[string]string{"done": "stop"})); err == nil || !strings.Contains(err.Error(), "Free tier") {
+		t.Errorf("gateway error message should be surfaced: %v", err)
+	}
+}
+
 func TestJevClientConfig(t *testing.T) {
+	t.Setenv("AI_GATEWAY_API_KEY", "")
 	t.Setenv("TYPESAFE_API_KEY", "")
 	t.Setenv("OPENROUTER_API_KEY", "")
 	t.Setenv("JEV_PROVIDER", "")

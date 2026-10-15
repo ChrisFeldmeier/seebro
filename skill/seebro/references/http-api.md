@@ -54,7 +54,7 @@ Action kinds for `/action` and `/actions`: `click`, `dblclick`, `clickAt`, `type
 | Variable | Default | Purpose |
 |---|---|---|
 | `BRIDGE_PORT` | 9867 | HTTP port |
-| `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY` | – | Jev decider for `/goal` (`TYPESAFE_BASE_URL`, `JEV_PROVIDER`, `JEV_MODEL` optional) |
+| `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY` | – | Jev decider for `/goal` (`TYPESAFE_BASE_URL`, `JEV_PROVIDER`, `JEV_MODEL` optional) |
 | `BRIDGE_BIND` | 127.0.0.1 | Listen address (non-loopback requires a token) |
 | `BRIDGE_ALLOWED_ORIGINS` | – | Web origins allowed to call the API |
 | `BRIDGE_TOKEN` | – | Bearer token (set it!) |
