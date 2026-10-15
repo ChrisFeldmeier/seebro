@@ -1,6 +1,6 @@
 # Changelog
 
-## seebro-speed (unreleased)
+## v1.1.0 (2026-10-15)
 
 ### Second engine: obscura
 - `BRIDGE_ENGINE=chrome|obscura|auto`; obscura runs as a managed sidecar (`obscura serve`), no Chrome needed
@@ -30,7 +30,6 @@
 - HTML5 drag works without a native `DataTransfer`/`DragEvent`
 - `scripts/loadtest.py`: load test (small, large, click-through shop flow, mixed, real sites) with a generated local test site
 
-## Unreleased
 
 ### Performance
 - In-page snapshot engine (isolated world) for interactive snapshots: Wikipedia 1,248 ms → 77 ms, GitHub 251 ms → 18 ms; `viewport=true` cuts output to what is on screen (83 KB → 2.6 KB)

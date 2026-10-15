@@ -87,7 +87,7 @@ Measured on the same machine against the previous release (Chrome 155, headless)
 | Full-page screenshot, Wikipedia (16,384 px) | timeout, tab hung for good | **673 ms** |
 | Text of Hacker News | lines glued together | correct line breaks |
 
-## Two Engines: Chrome and obscura (seebro-speed)
+## Two Engines: Chrome and obscura
 
 Seebro can drive two browsers with the same API, MCP tools and refs:
 
@@ -115,7 +115,7 @@ curl -X POST localhost:9867/tab -d '{"action":"new","url":"https://example.com",
 
 MCP: `tab_new {url, engine: "obscura"}`. `health` lists the available engines.
 
-## Goal Navigation with Jev (seebro-speed)
+## Goal Navigation with Jev
 
 Normally an agent drives Seebro one call at a time: snapshot → think → click → wait → snapshot. Every hop costs a full round trip through a large model, and every intermediate page passes through its context. `POST /goal` (MCP: `navigate_goal`) hands the whole navigation to a **small decision model** instead and returns when the goal is reached.
 
@@ -447,7 +447,7 @@ All endpoints accept `tabId`. Without it, the last tab used is taken. GET endpoi
 | `POST /navigate` | `url`, or `type: back\|forward\|reload`; `waitUntil: domcontentloaded\|load\|networkidle`; `newTab` (+ `context`) |
 | `POST /action` | Single action (kinds below) |
 | `POST /actions` | Several actions (`stopOnError`) |
-| `POST /goal` | Whole navigation in one call: `task`, `startUrl`, `decider` (`auto`/`jev`/`local`), `maxSteps`, `maxSeconds`, `query`, `inputs`, `noTyping`, `record`; returns status, final URL, step trace, usage (see [Goal Navigation](#goal-navigation-with-jev-seebro-speed)) |
+| `POST /goal` | Whole navigation in one call: `task`, `startUrl`, `decider` (`auto`/`jev`/`local`), `maxSteps`, `maxSeconds`, `query`, `inputs`, `noTyping`, `record`; returns status, final URL, step trace, usage (see [Goal Navigation](#goal-navigation-with-jev)) |
 | `POST /evaluate` | JavaScript; promises awaited; with `ref`/`selector` runs `el => …` |
 | `POST /wait` | `text` (one or many), `selector` (or `gone`), `url`, `networkIdle`, `timeout`; 408 on timeout |
 | `POST /tab` | `new` (+ `url`, `context`, `engine: chrome\|obscura`), `close`, `focus`, `reset` |
