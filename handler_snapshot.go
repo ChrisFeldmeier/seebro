@@ -70,17 +70,17 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			MaxNodes: queryInt(r, "maxNodes", 0),
 		})
 		if err != nil {
-			jsonErr(w, 500, fmt.Errorf("snapshot: %w", err))
+			b.failTab(w, resolvedTabID, fmt.Errorf("snapshot: %w", err))
 			return
 		}
 	} else {
 		flat, refs, url, title, err = b.axSnapshot(tCtx, filter, selector, maxDepth)
 		if err != nil {
-			code := 500
 			if strings.HasPrefix(err.Error(), "selector") {
-				code = 400
+				jsonErr(w, 400, err)
+			} else {
+				b.failTab(w, resolvedTabID, err)
 			}
-			jsonErr(w, code, err)
 			return
 		}
 	}

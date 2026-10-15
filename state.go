@@ -128,10 +128,12 @@ func (b *Bridge) RestoreState() {
 	navSem := make(chan struct{}, maxConcurrentNavs)
 
 	restored := 0
+	seen := map[string]bool{}
 	for _, tab := range state.Tabs {
-		if strings.Contains(tab.URL, "/sorry/") || strings.Contains(tab.URL, "about:blank") {
+		if strings.Contains(tab.URL, "/sorry/") || strings.Contains(tab.URL, "about:blank") || seen[tab.URL] {
 			continue
 		}
+		seen[tab.URL] = true
 
 		// Acquire semaphore for tab creation
 		tabSem <- struct{}{}

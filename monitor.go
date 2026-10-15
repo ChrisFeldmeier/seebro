@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/inspector"
 	cdplog "github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
@@ -89,8 +90,10 @@ type tabMonitor struct {
 	consoleSeq int64
 	consoleMax int
 
-	dialog   *dialogInfo
-	viewport *viewportState // device metrics set via /emulate
+	dialog       *dialogInfo
+	viewport     *viewportState // device metrics set via /emulate
+	crashed      bool           // renderer crashed (Inspector.targetCrashed)
+	unresponsive bool           // a call timed out and the renderer didn't answer a probe
 
 	inflight     int
 	lastActivity time.Time
@@ -267,6 +270,11 @@ func (m *tabMonitor) handleEvent(ctx context.Context, ev any) {
 			DefaultPrompt: e.DefaultPrompt, URL: e.URL, OpenedAt: time.Now().Format(time.RFC3339),
 		}
 		m.mu.Unlock()
+	case *inspector.EventTargetCrashed:
+		m.mu.Lock()
+		m.crashed = true
+		m.mu.Unlock()
+		m.addConsole("error", "browser", "renderer crashed — reset the tab", "", 0)
 	case *page.EventJavascriptDialogClosed:
 		m.mu.Lock()
 		m.dialog = nil

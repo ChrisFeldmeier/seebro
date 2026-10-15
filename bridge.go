@@ -40,6 +40,8 @@ type Bridge struct {
 	locks         *lockManager
 	monitors      map[string]*tabMonitor       // network/console/dialog recorders per tab
 	refs          map[string]*frameRefs        // snapshot-engine worlds and frame indexes per tab
+	lastUsed      map[string]time.Time         // per tab, for idle-tab cleanup
+	initialTab    string                       // owns the browser connection; never closed
 	active        string                       // last tab used explicitly; default for calls without tabId
 	userAgent     string                       // headless UA without "Headless" ("" when headed)
 	uaMeta        *emulation.UserAgentMetadata // matching client hints
@@ -81,6 +83,7 @@ func (b *Bridge) TabContext(tabID string) (context.Context, string, error) {
 		b.active = tabID
 		b.mu.Unlock()
 	}
+	b.markUsed(tabID)
 
 	// Fast path: read lock
 	b.mu.RLock()
@@ -222,6 +225,7 @@ func (b *Bridge) CreateTab(url string) (string, context.Context, context.CancelF
 	b.tabs[newTargetID] = &TabEntry{ctx: ctx, cancel: cancel}
 	b.active = newTargetID
 	b.mu.Unlock()
+	b.markUsed(newTargetID)
 
 	return newTargetID, ctx, cancel, nil
 }

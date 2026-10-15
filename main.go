@@ -107,7 +107,6 @@ func main() {
 			chromedp.Flag("disable-web-security", false),
 
 			// Performance & networking
-			chromedp.Flag("disable-background-networking", false),
 			chromedp.Flag("enable-features", "NetworkService,NetworkServiceInProcess"),
 			chromedp.Flag("disable-popup-blocking", true),
 			chromedp.Flag("no-first-run", true),
@@ -123,13 +122,30 @@ func main() {
 			// Window size (UA left as Chrome default to avoid detection mismatches)
 			chromedp.WindowSize(1366, 768),
 		}
+		var disabledFeatures []string
 		if !siteIsolation {
 			// Keep cross-origin iframes in the page's process so snapshots,
 			// text and actions reach into them (and fewer processes run).
+			chromeOpts = append(chromeOpts, chromedp.Flag("disable-site-isolation-trials", true))
+			disabledFeatures = append(disabledFeatures, "IsolateOrigins", "site-per-process")
+		}
+		if leanChrome {
+			// Background services an automation browser never needs
+			// (measured: ~14% less memory with two tabs open).
 			chromeOpts = append(chromeOpts,
-				chromedp.Flag("disable-site-isolation-trials", true),
-				chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
+				chromedp.Flag("disable-extensions", true),
+				chromedp.Flag("disable-component-update", true),
+				chromedp.Flag("disable-background-networking", true),
+				chromedp.Flag("disable-domain-reliability", true),
+				chromedp.Flag("disable-breakpad", true),
+				chromedp.Flag("mute-audio", true),
+				chromedp.Flag("no-pings", true),
 			)
+			disabledFeatures = append(disabledFeatures, "Translate", "OptimizationHints", "MediaRouter",
+				"AutofillServerCommunication", "CertificateTransparencyComponentUpdater", "InterestFeedContentSuggestions")
+		}
+		if len(disabledFeatures) > 0 {
+			chromeOpts = append(chromeOpts, chromedp.Flag("disable-features", strings.Join(disabledFeatures, ",")))
 		}
 
 		if chromeBinary != "" {
@@ -249,6 +265,7 @@ func main() {
 	// Register the initial tab
 	initTargetID := chromedp.FromContext(browserCtx).Target.TargetID
 	bridge.tabs[string(initTargetID)] = &TabEntry{ctx: browserCtx}
+	bridge.initialTab = string(initTargetID)
 	bridge.attachMonitorLocked(browserCtx, string(initTargetID))
 	bridge.setupDownloads()
 	slog.Info("initial tab", "id", string(initTargetID))
@@ -261,7 +278,13 @@ func main() {
 		}()
 	}
 
-	if !noRestore {
+	// Reopening last session's tabs is useful for a human in headed mode; for
+	// agents (headless) it only piles up stale tabs. BRIDGE_RESTORE overrides.
+	restore := !headless
+	if v := os.Getenv("BRIDGE_RESTORE"); v != "" {
+		restore = v == "true"
+	}
+	if restore && !noRestore {
 		// Restore in background so it doesn't block the HTTP server
 		go bridge.RestoreState()
 	}
@@ -270,6 +293,18 @@ func main() {
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
 	go bridge.CleanStaleTabs(cleanupCtx, 30*actionTimeout)
+	tabIdleTimeout = 30 * time.Minute
+	if !headless {
+		tabIdleTimeout = 0
+	}
+	if v := os.Getenv("BRIDGE_TAB_IDLE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			tabIdleTimeout = d
+		} else if v == "0" || v == "off" {
+			tabIdleTimeout = 0
+		}
+	}
+	go bridge.CloseIdleTabs(cleanupCtx, tabIdleTimeout)
 
 	// Routes
 	mux := http.NewServeMux()

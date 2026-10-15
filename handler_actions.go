@@ -245,7 +245,7 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	result, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(actCtx, req) })
 	if err != nil {
-		jsonErr(w, 500, fmt.Errorf("action %s: %w", req.Kind, err))
+		b.failTab(w, resolvedTabID, fmt.Errorf("action %s: %w", req.Kind, err))
 		return
 	}
 

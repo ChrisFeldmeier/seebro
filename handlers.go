@@ -56,6 +56,15 @@ func (b *Bridge) handleTabs(w http.ResponseWriter, r *http.Request) {
 			if d := m.Dialog(); d != nil {
 				entry["dialog"] = d
 			}
+			if h := m.health(); h != "" {
+				if h == "unresponsive" && b.probe(string(t.TargetID)) {
+					m.mu.Lock()
+					m.unresponsive = false // recovered
+					m.mu.Unlock()
+				} else {
+					entry["health"] = h
+				}
+			}
 		}
 		tabs = append(tabs, entry)
 	}
@@ -122,7 +131,7 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	buf, err = b.captureScreenshot(tCtx, resolvedTabID, opts)
 	if err != nil {
-		jsonErr(w, 500, fmt.Errorf("screenshot: %w", err))
+		b.failTab(w, resolvedTabID, fmt.Errorf("screenshot: %w", err))
 		return
 	}
 	ext := string(format)
@@ -216,7 +225,7 @@ func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
 		Title string `json:"title"`
 	}
 	if err := chromedp.Run(tCtx, chromedp.Evaluate("("+textJS+")("+string(opts)+")", &res)); err != nil {
-		jsonErr(w, 500, fmt.Errorf("text extract: %w", err))
+		b.failTab(w, tabID, fmt.Errorf("text extract: %w", err))
 		return
 	}
 	if mode != "raw" {
@@ -359,7 +368,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := navigatePage(tCtx, req.URL); err != nil {
-		jsonErr(w, 500, fmt.Errorf("navigate: %w", err))
+		b.failTab(w, resolvedTabID, fmt.Errorf("navigate: %w", err))
 		return
 	}
 
@@ -429,7 +438,7 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return map[string]any{"result": result}, err
 	})
 	if err != nil {
-		jsonErr(w, 500, fmt.Errorf("evaluate: %w", err))
+		b.failTab(w, resolvedTabID, fmt.Errorf("evaluate: %w", err))
 		return
 	}
 
@@ -473,6 +482,18 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonResp(w, 200, map[string]any{"closed": true})
 
+	case tabActionReset:
+		if req.TabID == "" {
+			jsonErr(w, 400, fmt.Errorf("tabId required"))
+			return
+		}
+		newID, url, err := b.ResetTab(req.TabID)
+		if err != nil {
+			jsonErr(w, 500, fmt.Errorf("reset: %w", err))
+			return
+		}
+		jsonResp(w, 200, map[string]any{"tabId": newID, "previousTabId": req.TabID, "url": url})
+
 	case tabActionFocus:
 		ctx, id, err := b.TabContext(req.TabID)
 		if err != nil {
@@ -486,7 +507,7 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 200, map[string]any{"focused": id})
 
 	default:
-		jsonErr(w, 400, fmt.Errorf("action must be 'new', 'close' or 'focus'"))
+		jsonErr(w, 400, fmt.Errorf("action must be 'new', 'close', 'focus' or 'reset'"))
 	}
 }
 

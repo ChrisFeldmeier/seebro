@@ -43,6 +43,7 @@ const (
 	tabActionNew   = "new"
 	tabActionClose = "close"
 	tabActionFocus = "focus"
+	tabActionReset = "reset"
 )
 
 //go:embed stealth.js
@@ -72,6 +73,8 @@ var (
 	stealthLevel      = envOr("BRIDGE_STEALTH", "light") // "light" or "full"
 	dialogPolicy      = os.Getenv("BRIDGE_DIALOG")       // "" (manual via /dialog), "accept" or "dismiss"
 	siteIsolation     = os.Getenv("BRIDGE_SITE_ISOLATION") == "true"
+	leanChrome        = os.Getenv("BRIDGE_LEAN") != "false" // trim Chrome background services
+	tabIdleTimeout    time.Duration                         // set in main: BRIDGE_TAB_IDLE (default 30m headless, off headed)
 	downloadDir       = envOr("BRIDGE_DOWNLOAD_DIR", filepath.Join(homeDir(), ".seebro", "downloads"))
 	networkBufferSize = envInt("BRIDGE_NETWORK_BUFFER", 300) // requests kept per tab
 	consoleBufferSize = envInt("BRIDGE_CONSOLE_BUFFER", 200) // console messages kept per tab
