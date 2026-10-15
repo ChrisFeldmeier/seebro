@@ -79,7 +79,7 @@
   function nameOf(el, role) {
     let n = textByIds(el, "aria-labelledby");
     if (!n) n = el.getAttribute("aria-label") || "";
-    if (!n && el.labels && el.labels.length) n = [...el.labels].map((l) => labelText(l, el)).join(" ");
+    if (!n && el.labels && el.labels.length) n = Array.from(el.labels).map((l) => labelText(l, el)).join(" ");
     const tag = el.tagName;
     if (!n && tag === "INPUT") {
       const t = (el.type || "").toLowerCase();
@@ -104,13 +104,14 @@
   function valueOf(el, role) {
     const tag = el.tagName;
     if (tag === "SELECT") {
-      return clean([...el.selectedOptions].map((o) => o.textContent).join(", "), 80);
+      // Array.from + filter instead of selectedOptions: not every DOM implements it.
+      return clean(Array.from(el.options || []).filter((o) => o.selected).map((o) => o.textContent).join(", "), 80);
     }
     if (tag === "INPUT") {
       const t = (el.type || "").toLowerCase();
       if (t === "checkbox" || t === "radio" || t === "submit" || t === "button" || t === "reset" || t === "image") return "";
       if (t === "password") return el.value ? "•••" : "";
-      if (t === "file") return clean([...(el.files || [])].map((f) => f.name).join(", "), 80);
+      if (t === "file") return clean(Array.from(el.files || []).map((f) => f.name).join(", "), 80);
       return clean(el.value, 80);
     }
     if (tag === "TEXTAREA") return clean(el.value, 80);
@@ -164,7 +165,7 @@
     // stack entries: [element, insideInteractive, parentHasPointer]
     const stack = [];
     const pushChildren = (parent, inside, pointer) => {
-      const kids = parent.shadowRoot ? [...parent.shadowRoot.children, ...parent.children] : parent.children;
+      const kids = parent.shadowRoot ? Array.from(parent.shadowRoot.children).concat(Array.from(parent.children)) : parent.children;
       for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i], inside, pointer]);
     };
     if (opts.root) stack.push([opts.root, false, false]);
@@ -201,7 +202,7 @@
             if (el === active) n.focused = true;
             if (el.required || el.getAttribute("aria-required") === "true") n.required = true;
             if (tag === "SELECT") {
-              const o = [...el.options].map((o) => clean(o.textContent, 40));
+              const o = Array.from(el.options || []).map((o) => clean(o.textContent, 40));
               n.options = o.length > 12 ? o.slice(0, 12).concat(`…(${o.length})`) : o;
             }
             if (opts.links && role === "link" && el.href) n.href = el.href;
