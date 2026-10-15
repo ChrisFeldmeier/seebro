@@ -36,7 +36,7 @@ type goalRequest struct {
 	TabID      string            `json:"tabId"`
 	Task       string            `json:"task"`
 	StartURL   string            `json:"startUrl"`
-	Decider    string            `json:"decider"` // jev (default when a key is set) or local
+	Decider    string            `json:"decider"` // auto (default), jev or local
 	Model      string            `json:"model"`   // Jev snapshot, default jev-latest
 	MaxSteps   int               `json:"maxSteps"`
 	MaxSeconds float64           `json:"maxSeconds"`
@@ -61,6 +61,8 @@ type goalStep struct {
 	Detail      string   `json:"detail,omitempty"`
 	Outcome     string   `json:"outcome"`
 	Recovery    string   `json:"recovery,omitempty"`
+	DecidedBy   string   `json:"decided_by,omitempty"`
+	Fallback    string   `json:"fallback_reason,omitempty"`
 	Error       string   `json:"error,omitempty"`
 }
 
@@ -477,6 +479,9 @@ func (g *goalRunner) run(ctx context.Context) goalResult {
 		if p, ok := act.Probabilities[act.Choice]; ok {
 			s.TopProb = &p
 		}
+		if fd, ok := g.dec.(interface{ decidedBy() (string, string) }); ok {
+			s.DecidedBy, s.Fallback = fd.decidedBy()
+		}
 		// Stop gates run before acting: a watcher that fires on the current
 		// page must not be overridden by acting on that page.
 		if act.Choice == "done" {
@@ -826,11 +831,56 @@ func newDecider(req goalRequest) (decider, error) {
 	switch req.Decider {
 	case "local":
 		return newLocalDecider(req.Task), nil
-	case "", "jev":
+	case "jev":
 		return newJevClient(req.Model)
+	case "", "auto":
+		local := newLocalDecider(req.Task)
+		jev, err := newJevClient(req.Model)
+		if err != nil { // no key configured: offline matcher
+			return local, nil
+		}
+		return &fallbackDecider{primary: jev, secondary: local}, nil
 	}
-	return nil, fmt.Errorf("decider must be jev or local")
+	return nil, fmt.Errorf("decider must be auto, jev or local")
 }
+
+// fallbackDecider asks Jev and, when a call fails after its retries (network,
+// rate limit, credits used up, malformed answer), lets the offline matcher
+// decide that step so the run keeps going. Every step records who decided.
+type fallbackDecider struct {
+	primary, secondary decider
+	last               string
+	lastErr            string
+}
+
+func (f *fallbackDecider) Name() string {
+	return "auto(" + f.primary.Name() + ", fallback " + f.secondary.Name() + ")"
+}
+
+func (f *fallbackDecider) Decide(ctx context.Context, state any, qs map[string]jevQuestion) (map[string]jevAnswer, jevUsage, error) {
+	if st, ok := state.(goalState); ok { // keep the matcher's page memory current
+		if ld, ok := f.secondary.(*localDecider); ok {
+			ld.visited = append(ld.visited, strings.ToLower(st.CurrentPage["title"]))
+		}
+	}
+	a, u, err := f.primary.Decide(ctx, state, qs)
+	if err == nil {
+		f.last, f.lastErr = f.primary.Name(), ""
+		return a, u, nil
+	}
+	if ctx.Err() != nil {
+		return nil, jevUsage{}, err
+	}
+	f.last, f.lastErr = f.secondary.Name(), err.Error()
+	a, _, err2 := f.secondary.Decide(ctx, state, qs)
+	if err2 != nil {
+		return nil, jevUsage{}, fmt.Errorf("%v; fallback: %v", err, err2)
+	}
+	return a, u, nil
+}
+
+// decidedBy reports which decider answered the last call and why it fell back.
+func (f *fallbackDecider) decidedBy() (string, string) { return f.last, f.lastErr }
 
 // handleGoal returns POST /goal, dispatching to the given API in-process.
 func (b *Bridge) handleGoal(api http.Handler) http.HandlerFunc {

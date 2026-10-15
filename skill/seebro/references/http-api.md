@@ -20,7 +20,7 @@ curl -s -H "$A" -X POST $S/action -d "{\"tabId\":\"$TAB\",\"kind\":\"click\",\"r
 | contexts | `GET /contexts`, `POST /context` | `action: close`, `name` |
 | tab_lock / tab_unlock | `POST /tab/lock`, `/tab/unlock` | `tabId`, `owner`, `timeoutSec` |
 | navigate | `POST /navigate` | `url`, `type` url\|back\|forward\|reload, `waitUntil` domcontentloaded\|load\|networkidle, `ignoreCache`, `newTab`, `context`, `timeout` (s), `waitTitle`, `blockImages`, `blockMedia` |
-| navigate_goal | `POST /goal` | `task`, `startUrl`, `decider` jev\|local, `maxSteps`, `maxSeconds`, `query`, `inputs` {label: text}, `noTyping`, `record`, `recordPath`, `model` |
+| navigate_goal | `POST /goal` | `task`, `startUrl`, `decider` auto\|jev\|local, `maxSteps`, `maxSeconds`, `query`, `inputs` {label: text}, `noTyping`, `record`, `recordPath`, `model` |
 | get_text | `GET /text` | `mode` readability\|markdown\|raw, `maxChars`, `offset` (→ `nextOffset`) |
 | snapshot | `GET /snapshot` | `filter=interactive`, `viewport`, `links`, `format` compact\|text\|yaml, `diff`, `selector`, `maxNodes`, `maxTokens`, `engine=ax`, `depth` (ax), `output=file`, `path` |
 | screenshot | `GET /screenshot` | `format` jpeg\|png\|webp, `quality`, `fullPage`, `ref`/`selector`, `maxDim`, `maxHeight`, `raw=true` (image bytes), `output=file`, `path` |

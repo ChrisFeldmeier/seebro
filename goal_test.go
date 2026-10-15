@@ -581,3 +581,49 @@ func TestHandleGoalValidation(t *testing.T) {
 		}
 	}
 }
+
+type failing struct{ calls int }
+
+func (f *failing) Name() string { return "jev" }
+func (f *failing) Decide(context.Context, any, map[string]jevQuestion) (map[string]jevAnswer, jevUsage, error) {
+	f.calls++
+	return nil, jevUsage{}, fmt.Errorf("vercel HTTP 402: credits used up")
+}
+
+func TestGoalAutoFallback(t *testing.T) {
+	task := "Go from Coffee to Espresso, then to the Ristretto article"
+	jev := &failing{}
+	d := &fallbackDecider{primary: jev, secondary: newLocalDecider(task)}
+	res := runGoal(t, wiki(), d, goalRequest{Task: task, StartURL: "/Coffee"})
+	if res.Status != "done" || res.FinalURL != "/Ristretto" || jev.calls != 3 {
+		t.Fatalf("fallback run: %s at %s, jev calls %d", res.Status, res.FinalURL, jev.calls)
+	}
+	if s := res.Steps[0]; s.DecidedBy != "local" || !strings.Contains(s.Fallback, "credits") {
+		t.Errorf("step must say who decided and why: %+v", s)
+	}
+
+	// primary healthy: no fallback noted
+	ok := &scripted{steps: []map[string]jevAnswer{ans("done", nil, 0, 0)}}
+	res = runGoal(t, wiki(), &fallbackDecider{primary: ok, secondary: newLocalDecider(task)}, goalRequest{Task: task, StartURL: "/Coffee"})
+	if s := res.Steps[0]; s.DecidedBy != "scripted" || s.Fallback != "" {
+		t.Errorf("healthy primary: %+v", s)
+	}
+}
+
+func TestNewDeciderAuto(t *testing.T) {
+	for _, k := range []string{"TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "JEV_PROVIDER"} {
+		t.Setenv(k, "")
+	}
+	d, err := newDecider(goalRequest{Task: "find x"})
+	if err != nil || d.Name() != "local" {
+		t.Errorf("auto without key → local, got %v %v", d, err)
+	}
+	if _, err := newDecider(goalRequest{Task: "x", Decider: "jev"}); err == nil {
+		t.Error("explicit jev without key must error")
+	}
+	t.Setenv("AI_GATEWAY_API_KEY", "vck_test")
+	d, _ = newDecider(goalRequest{Task: "find x"})
+	if !strings.HasPrefix(d.Name(), "auto(vercel:") {
+		t.Errorf("auto with key: %s", d.Name())
+	}
+}

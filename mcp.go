@@ -456,7 +456,7 @@ func mcpTools() []mcpTool {
 			InputSchema: obj(withTab(map[string]any{
 				"task":       pStr("What to achieve, e.g. \"Find the Ristretto article on Wikipedia\""),
 				"startUrl":   pStr("Navigate here first (default: start from the current page)"),
-				"decider":    pEnum("jev (default; needs a Jev key) or local (offline keyword matcher)", "jev", "local"),
+				"decider":    pEnum("auto (default: Jev if a key is set, else/on failure the offline matcher), jev (Jev only) or local (offline keyword matcher)", "auto", "jev", "local"),
 				"maxSteps":   pNum("Step budget (default 24)"),
 				"maxSeconds": pNum("Time budget in seconds (default 180)"),
 				"query":      pStr("Text for search boxes (default: the task's keywords)"),

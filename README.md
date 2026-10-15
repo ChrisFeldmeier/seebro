@@ -133,12 +133,14 @@ The run stops on Cloudflare challenge or block pages (`status: "blocked"` with e
 |---|---|
 | `task` | What to achieve (required) |
 | `startUrl` | Navigate here first; otherwise start from the tab's current page |
-| `decider` | `jev` (default) or `local` (offline keyword matcher for simple link and search hops, no key) |
+| `decider` | `auto` (default: Jev when a key is set, the offline matcher otherwise, and per step when a Jev call fails), `jev` (Jev only; errors stop the run) or `local` (offline keyword matcher for simple link and search hops) |
 | `maxSteps`, `maxSeconds` | Budgets (default 24 steps, 180 s) |
 | `query` | Text for search boxes (default: the task's keywords) |
 | `inputs` | `{"email": "a@b.c"}`: text for fields whose label contains the key. Without an entry nothing is typed into ordinary fields. |
 | `noTyping` | Only click, never type |
 | `record`, `recordPath` | Record the run as an MP4 |
+
+Everything runs inside the Seebro binary: its own Chrome, its own snapshot engine, and plain HTTPS calls to the model. No Playwright, Node or jev-browser is needed. Each step's `decided_by` (and `fallback_reason`) shows which decider answered.
 
 **Deciders.** `jev` uses TypeSafe's Jev model (~0.4 s and ~$0.0001 per step). Set one key in Seebro's environment:
 
