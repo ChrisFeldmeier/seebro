@@ -14,12 +14,16 @@ cd seebro
 # Start with docker-compose
 docker-compose up -d
 
-# Check logs
+# Check logs (without SEEBRO_TOKEN set, the generated token is printed here once)
 docker-compose logs -f
 
 # Test
-curl http://localhost:9867/health
+curl -H "Authorization: Bearer $SEEBRO_TOKEN" http://localhost:9867/health
 ```
+
+Inside the container Seebro listens on all interfaces (`BRIDGE_BIND=0.0.0.0`, set in the image).
+Because of that it always requires a token: set `BRIDGE_TOKEN` (compose: `SEEBRO_TOKEN`), or Seebro
+generates one on first start, saves it in the data volume and prints it to the log.
 
 ### Using Docker CLI
 
@@ -49,7 +53,9 @@ docker run -d \
 
 Environment variables:
 - `BRIDGE_PORT` - HTTP port (default: 9867)
-- `BRIDGE_TOKEN` - Auth token (optional)
+- `BRIDGE_TOKEN` - Auth token (generated and printed to the log if unset)
+- `BRIDGE_BIND` - Listen address (`0.0.0.0` in the image)
+- `BRIDGE_ALLOWED_ORIGINS` - Web origins allowed to call the API from a browser (default: none)
 - `BRIDGE_HEADLESS` - Run Chrome headless (default: true in Docker)
 - `BRIDGE_STATE_DIR` - State directory (default: /data)
 - `BRIDGE_STEALTH` - Stealth level: `light` (default) or `full`
@@ -73,8 +79,8 @@ The Docker image:
 The container requires `--security-opt seccomp=unconfined` for Chrome to function properly. This is a limitation of running Chrome in containers.
 
 For production use:
-1. Always set `BRIDGE_TOKEN`
-2. Use a reverse proxy with TLS
+1. Set your own `BRIDGE_TOKEN`
+2. Use a reverse proxy with TLS (add its host name to `BRIDGE_ALLOWED_HOSTS` only if Seebro listens on loopback behind it)
 3. Limit container resources
 4. Run on isolated networks
 

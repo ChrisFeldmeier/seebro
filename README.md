@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
   <img src="https://img.shields.io/badge/~9MB_binary-FFD700?style=flat-square" alt="~9MB"/>
   <img src="https://img.shields.io/badge/REST_API-00ff88?style=flat-square" alt="REST"/>
-  <img src="https://img.shields.io/badge/MCP-38_tools-7c3aed?style=flat-square" alt="MCP"/>
+  <img src="https://img.shields.io/badge/MCP-43_tools-7c3aed?style=flat-square" alt="MCP"/>
   <img src="https://img.shields.io/badge/MIT-888?style=flat-square" alt="MIT"/>
 </p>
 
@@ -22,14 +22,14 @@
 
 Browser automation tools are designed for humans, not agents. Playwright, Puppeteer and Selenium return massive DOM dumps or screenshots that burn through tokens. Most agent-specific solutions are locked into their own ecosystems.
 
-Seebro takes a different approach: **accessibility trees over HTTP and MCP**. One small Go binary controls Chrome. Any agent can drive it with plain HTTP calls, and Claude (or any other MCP client) can use it as a native toolset.
+Seebro takes a different approach: **compact text and element refs over HTTP and MCP**. One small Go binary controls Chrome. Any agent can drive it with plain HTTP calls, and Claude (or any other MCP client) can use it as a native toolset.
 
 ```bash
-# Get page content — ~800 tokens instead of 10,000+
-curl localhost:9867/text
+# Interactive elements on screen — ~650 tokens for a Wikipedia article
+curl "localhost:9867/snapshot?filter=interactive&format=compact&viewport=true"
 
-# Interact with elements using stable refs
-curl -X POST localhost:9867/action -d '{"kind":"click","ref":"e5"}'
+# Act on them by ref
+curl -X POST localhost:9867/action -d '{"kind":"click","ref":"e12"}'
 
 # Or let Claude drive it directly
 claude mcp add seebro -- seebro mcp
@@ -39,53 +39,67 @@ claude mcp add seebro -- seebro mcp
 
 | Area | What you get |
 |---|---|
-| **Reading** | Readable page text, accessibility-tree snapshots with stable refs (full, interactive-only, diff, scoped, token-capped), element inspection with attributes, box, HTML and computed styles |
-| **Interaction** | Click, double click, click at coordinates, type, fill (React/Vue-safe), whole forms in one call, key presses and combos (`Enter`, `Control+A`), hover, select, scroll, drag & drop (HTML5 + mouse), file upload, human-like mouse and typing |
-| **Navigation** | Load URLs, back / forward / reload, wait for text, element, URL or network idle, multiple tabs with locking for multi-agent use |
-| **DevTools** | Network log with headers, POST data and response bodies, console messages and uncaught exceptions, JS dialog handling (`alert` / `confirm` / `prompt`) |
-| **Emulation** | Mobile viewports and touch, dark mode, reduced motion, geolocation, network and CPU throttling, user agent, extra HTTP headers, timezone, locale |
-| **Output** | Screenshots (JPEG/PNG/WebP, viewport, full page or single element), PDF export, downloads (CSV/PDF exports land in a known folder) |
-| **Scripting** | Run JavaScript in the page; promises are awaited, so `fetch('/api/…')` runs with the page's own login |
-| **Sessions** | Persistent Chrome profile (logins survive restarts), cookie read/write |
-| **Stealth** | Hides automation fingerprints, fingerprint rotation |
-| **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 38 tools), Claude skill |
+| **Reading** | Page text as clean text or **markdown** (headings, lists, links, tables) with paging; interactive-element snapshots with **stable refs**, a **viewport-only** mode and diffs; full accessibility tree; element inspection (attributes, box, HTML, computed styles) |
+| **iframes** | Snapshots, text and actions reach into **iframes, including cross-origin** ones (payment forms, embedded logins, editors) |
+| **Interaction** | Click, double click, click at coordinates, type (fast `insertText`), fill (React/Vue-safe), whole forms in one call, keys and combos (`Enter`, `Control+A`), hover, select, scroll, drag & drop (HTML5 + mouse), file upload, human-like mouse and typing |
+| **Navigation** | Load URLs, back / forward / reload, `waitUntil` load / network idle, wait for text / element / URL (reacts instantly to DOM changes), multiple tabs |
+| **DevTools** | Network log with headers, POST data and response bodies, **WebSocket and Server-Sent Events**, console and uncaught exceptions, JS dialogs, **HAR export**, **performance metrics and Web Vitals** |
+| **Emulation** | Mobile viewports and touch, dark mode, reduced motion, geolocation, network and CPU throttling, user agent, extra headers, timezone, locale |
+| **Output** | Screenshots (JPEG/PNG/WebP; viewport, full page or element; auto-scaled for LLMs), PDF export, downloads (CSV/PDF exports land in a known folder) |
+| **Scripting** | JavaScript in the page with awaited promises: `fetch('/api/…')` runs with the page's own login |
+| **Sessions** | Persistent Chrome profile (logins survive restarts), cookies, **isolated incognito-like contexts** for parallel agents or second accounts |
+| **Multi-agent** | One shared browser for all MCP clients, tab locks that are actually enforced, per-session identity |
+| **Robustness** | Hung or crashed tabs are detected and can be reset; idle tabs are closed automatically; JS dialogs never block a call |
+| **Stealth** | Passes common bot checks: no `webdriver` flag, no "HeadlessChrome" in user agent or client hints, real plugins, native-looking overrides, live self-check |
+| **Security** | Loopback by default, web pages can't reach the API (CSRF/DNS-rebinding guard), token enforced beyond loopback |
+| **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 43 tools), Claude skill |
 
 ## How It Compares
 
 | | Seebro | Typical Browser Tools |
 |---|---|---|
-| **Token cost** | ~800 (text) / ~3,600 (interactive) | 10,000+ (full DOM/screenshot) |
+| **Token cost** | ~650 (on-screen elements) / ~800 (text) | 10,000+ (full DOM/screenshot) |
 | **Interface** | HTTP + MCP – works with any agent | Framework-specific |
-| **Output format** | Structured a11y tree | Raw HTML or pixels |
-| **Bot detection** | Built-in stealth | Manual configuration |
-| **Session handling** | Automatic persistence | Usually ephemeral |
+| **Output format** | Compact refs, text, markdown | Raw HTML or pixels |
+| **Bot detection** | Built-in, self-checking stealth | Manual configuration |
+| **Session handling** | Persistent profile + isolated contexts | Usually ephemeral |
 | **Deployment** | Single ~9 MB binary | Complex dependencies |
 
-**Bottom line:** 5-13x cheaper for typical browsing tasks, and it works with any agent that can make HTTP calls or speak MCP.
+## Performance
+
+Measured on the same machine against the previous release (Chrome 155, headless):
+
+| Operation | Before | Now |
+|---|---|---|
+| Interactive snapshot, Wikipedia article (27k a11y nodes) | 1,248 ms, 10 MB transferred from Chrome | **77 ms** |
+| …same, only elements on screen (`viewport=true`) | – (83 KB ≈ 20k tokens) | **73 ms, 2.6 KB ≈ 650 tokens** |
+| Interactive snapshot, GitHub repo page | 251 ms | **18 ms** |
+| Navigate to a page without `<title>` | 2,394 ms | **108 ms** |
+| Type 300 characters | 495 ms | **7 ms** |
+| Full-page screenshot, Wikipedia (16,384 px) | timeout, tab hung for good | **673 ms** |
+| Text of Hacker News | lines glued together | correct line breaks |
 
 ## Binary Size & Footprint
 
-Release builds (`-ldflags "-s -w"`, as produced by goreleaser), measured for this version:
+Release builds (`-ldflags "-s -w"`, as produced by goreleaser):
 
 | Platform | Size |
 |---|---|
-| macOS arm64 | 8.9 MB |
-| macOS amd64 | 9.4 MB |
-| Linux arm64 | 8.7 MB |
-| Linux amd64 | 9.2 MB |
-| Windows amd64 | 9.5 MB |
+| macOS arm64 | 9.1 MB |
+| macOS amd64 | 9.6 MB |
+| Linux arm64 | 8.8 MB |
+| Linux amd64 | 9.4 MB |
+| Windows amd64 | 9.7 MB |
 
-The MCP server and DevTools features add about 0.3 MB to the binary. A plain `go build` without stripping is around 13 MB.
-
-At runtime the Seebro process itself uses about 15 MB of RAM. Chrome runs as a separate process. Network and console logs are kept in fixed-size per-tab buffers (300 requests and 200 messages by default). Response bodies are never copied into Seebro; Chrome holds them (capped at 5 MB per resource and 25 MB per tab) and Seebro fetches them only when you ask. Memory therefore stays flat however long a tab stays open.
+At runtime the Seebro process uses about 15 MB of RAM; Chrome runs as separate processes. Network, console and WebSocket logs are fixed-size per-tab ring buffers (300 / 200 / 200 entries); response bodies stay in Chrome (capped at 5 MB per resource, 25 MB per tab) and are fetched only when asked for. Chrome itself starts with background services disabled (~9% less memory than a default Chrome) and idle tabs are closed after 30 minutes in headless mode.
 
 ## Getting Started
 
 ### Option 1: Docker
 
 ```bash
-docker run -d -p 9867:9867 --security-opt seccomp=unconfined seebro/seebro
-curl http://localhost:9867/health
+docker run -d -p 9867:9867 -e BRIDGE_TOKEN=your-secret --security-opt seccomp=unconfined seebro/seebro
+curl -H "Authorization: Bearer your-secret" http://localhost:9867/health
 ```
 
 ### Option 2: Build from Source
@@ -101,14 +115,14 @@ With [OpenClaw](https://openclaw.ai) or Claude, ask your agent to set up Seebro.
 
 ## MCP Server (Claude & other MCP clients)
 
-Seebro has a built-in [Model Context Protocol](https://modelcontextprotocol.io) server. Claude Code, Claude Desktop and any other MCP client can drive the browser through **38 tools**, with no extra install, runtime or dependency. The MCP server lives in the same binary.
+Seebro has a built-in [Model Context Protocol](https://modelcontextprotocol.io) server with **43 tools**, in the same binary. No extra install, runtime or dependency.
 
 ### Setup
 
 **Claude Code** (stdio, recommended):
 
 ```bash
-claude mcp add seebro -- /path/to/seebro mcp
+claude mcp add --scope user seebro -- /path/to/seebro mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
@@ -137,45 +151,42 @@ claude mcp add --transport http seebro http://localhost:9867/mcp \
 └──────────────┘          └──────────────┘                  └──────────────┘       └────────┘
 ```
 
-- `seebro mcp` is a thin proxy mode of the same binary. It forwards JSON-RPC to `POST /mcp` on the running server.
-- If no server is reachable on `localhost`, `seebro mcp` **starts one in the background** (headless, logging to `~/.seebro/seebro.log`). It also restarts the server if it disappears mid-session.
-- All MCP clients share one Chrome and one profile instead of each starting its own browser.
-- Every MCP tool is dispatched in-process onto the HTTP API, so the MCP and REST surfaces always behave identically.
-- The auth token is read from `BRIDGE_TOKEN` or `~/.seebro/config.json` automatically.
-- If a JS dialog blocks a page, every tool result includes a notice telling the agent to call `handle_dialog`.
-- Screenshots are returned as MCP image content, so the model sees them directly.
+- `seebro mcp` is a thin proxy mode of the same binary that forwards JSON-RPC to `POST /mcp`.
+- If no server answers on `localhost`, it **starts one in the background** (headless, log in `~/.seebro/seebro.log`, rotated at 10 MB) and restarts it if it disappears mid-session.
+- All MCP clients share one Chrome and one profile. Each session identifies itself, so `tab_lock` keeps other agents out of a tab.
+- Every tool is dispatched in-process onto the HTTP API, so MCP and REST behave identically.
+- The token is read from `BRIDGE_TOKEN` or `~/.seebro/config.json`.
+- Screenshots come back as images, scaled to Claude's 1568 px; a blocking JS dialog is reported on every call.
 
 ### MCP tools
 
 | Group | Tools |
 |---|---|
-| **Tabs** | `tabs_list`, `tab_new`, `tab_close`, `tab_focus`, `tab_lock`, `tab_unlock` |
-| **Navigate & read** | `navigate` (url / back / forward / reload), `get_text`, `snapshot`, `screenshot`, `inspect_element`, `wait_for` |
+| **Tabs** | `tabs_list`, `tab_new` (optionally in an isolated `context`), `tab_close`, `tab_focus`, `tab_reset`, `tab_lock`, `tab_unlock`, `contexts` |
+| **Navigate & read** | `navigate` (url / back / forward / reload, `waitUntil`), `get_text` (readability / markdown / raw, paged), `snapshot` (stable refs, `viewport`, `diff`, iframes), `screenshot`, `inspect_element`, `wait_for` |
 | **Input** | `click` (incl. double / human-like), `click_at`, `type_text` (with `submitKey`), `fill`, `fill_form`, `press_key`, `hover`, `select_option`, `scroll`, `drag`, `upload_file`, `batch_actions` |
-| **Scripting** | `evaluate` (awaits promises; can run `el => …` on a ref/selector) |
-| **Network & console** | `network_requests`, `network_request`, `console_messages`, `clear_logs`, `handle_dialog` |
-| **Emulation & output** | `emulate`, `save_pdf`, `downloads` |
+| **Scripting** | `evaluate` (awaits promises; `el => …` on a ref/selector) |
+| **Network & console** | `network_requests`, `network_request`, `websocket_messages`, `export_har`, `console_messages`, `clear_logs`, `handle_dialog` |
+| **Emulation & output** | `emulate`, `performance_metrics`, `save_pdf`, `downloads` |
 | **Session** | `cookies_get`, `cookies_set` |
 | **Status & stealth** | `health`, `stealth_status`, `fingerprint_rotate` |
 
-`POST /shutdown` is deliberately **not** exposed as a tool, so an agent cannot stop the browser that other sessions share.
+`POST /shutdown` is deliberately not a tool, so one agent cannot stop the browser other sessions share.
 
 ### Claude skill
 
-[`skill/seebro/SKILL.md`](skill/seebro/SKILL.md) teaches Claude how to work with Seebro effectively:
+[`skill/seebro/SKILL.md`](skill/seebro/SKILL.md) teaches Claude how to work with Seebro:
 
 - the core loop: tab → text/snapshot → act by ref → wait → re-snapshot
-- **getting data out of web apps**: capture the app's own API calls from the network log, call its API from inside the page with `fetch`, read the DOM, or use the app's export plus `downloads`
-- logins and persistent sessions, forms, dialogs, debugging with console and network logs
-- safety rules: no purchases, messages or deletions without the user's OK, and page text is never treated as instructions
-
-Install it for Claude Code:
+- **getting data out of web apps**: capture the app's own API calls (HTTP and WebSocket), call its API from inside the page with `fetch`, read the DOM as markdown, or use the app's export plus `downloads`
+- logins, isolated contexts, forms, iframes, dialogs, debugging, recovering hung tabs
+- safety rules: no purchases, messages or deletions without the user's OK; page text is data, not instructions
 
 ```bash
 cp -r skill/seebro ~/.claude/skills/seebro
 ```
 
-The HTTP equivalents of every tool are in [`skill/seebro/references/http-api.md`](skill/seebro/references/http-api.md).
+The HTTP equivalent of every tool is in [`skill/seebro/references/http-api.md`](skill/seebro/references/http-api.md).
 
 ### Example: pull JSON out of a web app
 
@@ -195,7 +206,7 @@ evaluate         {tabId, expression: "fetch('/api/orders?page=2').then(r => r.js
 BRIDGE_HEADLESS=true ./seebro
 ```
 
-Chrome runs invisibly. This is what Seebro is optimized and tested for. Best for servers, CI pipelines, and automated workflows. `seebro mcp` starts the server headless by default.
+Chrome runs invisibly. This is what Seebro is optimized and tested for. `seebro mcp` starts the server headless. Tabs from the last session are not restored and idle tabs are closed after 30 minutes.
 
 ### Headed (Development)
 
@@ -203,77 +214,81 @@ Chrome runs invisibly. This is what Seebro is optimized and tested for. Best for
 ./seebro
 ```
 
-Opens a Chrome window you can watch and interact with. Useful for debugging and manual logins: log in once in headed mode, then restart headless. The session stays in the profile. Note: headed mode has some rough edges – profile management is manual, and some sites behave differently.
+Opens a Chrome window you can watch and use. Useful for debugging and manual logins: log in once in headed mode, then restart headless — the session stays in the profile. Tabs are restored and never closed automatically.
 
 ## Core Concepts
 
-### Accessibility Tree & Refs
+### Snapshots & Refs
 
-Instead of HTML, Seebro returns the browser's accessibility tree – the same structure screen readers use. Each element gets a stable ref (`e0`, `e1`, `e2`...) that you use for interactions.
+`/snapshot?filter=interactive` lists everything an agent can act on, one line per element:
 
 ```
-e0:RootWebArea "Example Domain"
-e1:heading "Example Domain"
-e2:link "More information..."
+# Checkout | https://shop.example/checkout | 6 nodes (+40 outside the viewport)
+e12:textbox "Email" required
+e13:combobox "Country" val="Germany" opts=[Germany|Austria|Switzerland]
+e14:checkbox "Save address" checked
+e15:button "Continue"
+# frame f1 https://js.payments.example/elements
+f1e3:textbox "Card number"
+f1e4:textbox "Expiry"
 ```
 
-Click `e2` and the link activates. No coordinate guessing, no CSS selectors that break. Refs belong to the latest snapshot; after a navigation or a large DOM change, take a new one.
+- The list is computed **inside the page** by a small engine running in an isolated JavaScript world. The page can't see it, and only matching elements leave the browser. That makes it ~15x faster than reading Chrome's accessibility tree on large pages.
+- **Refs are stable.** `e12` keeps pointing at the same element across snapshots for as long as it exists. A ref from a previous page fails with a clear "stale" error and never hits a different element.
+- `f1e3` lives in iframe `f1`. Cross-origin iframes are included.
+- `viewport=true` keeps only what's on screen; `diff=true` returns only what changed; `links=true` adds link URLs.
+- `filter=all` returns Chrome's full accessibility tree (refs `a0`, `a1` …, main frame only).
 
 ### Token Efficiency
 
-Real measurements from a search results page:
+Measured on a Wikipedia article:
 
 | Method | Tokens |
 |---|---|
-| Full accessibility snapshot | ~10,500 |
-| Interactive elements only (`?filter=interactive`) | ~3,600 |
-| Text content (`/text`) | ~800 |
-| Screenshot (vision model) | ~2,000 |
-
-For a 50-page monitoring task:
-- Screenshots: ~$0.30
-- Full snapshots: ~$0.16
-- Seebro `/text`: ~$0.01
+| Full accessibility tree (`format=compact`) | ~100,000 |
+| Interactive elements (`?filter=interactive&format=compact`) | ~20,000 |
+| Interactive elements on screen (`&viewport=true`) | ~650 |
+| Text, first page (`/text?maxChars=30000`) | ~7,500 |
+| Screenshot of the viewport (1366×681) | ~1,250 |
 
 ### Session Persistence
 
-Log in once, stay logged in. Seebro maintains a Chrome profile at `~/.seebro/chrome-profile/` that persists cookies, auth tokens, and open tabs across restarts.
+Log in once, stay logged in. Seebro maintains a Chrome profile at `~/.seebro/chrome-profile/` that keeps cookies and storage across restarts. Isolated contexts (`"context": "name"` when opening a tab) live only in memory.
 
-### Network & Console Recording
+### Network, Console & WebSocket Recording
 
-Every tab records its network requests and console output from the moment Seebro attaches to it. Lists default to "since the last navigation" (`all=true` includes earlier ones still in the buffer). Request and response headers are kept; bodies and POST data are fetched from Chrome on demand.
+Every tab records its HTTP requests, WebSocket frames, Server-Sent Events and console output from the moment Seebro attaches. Lists default to "since the last navigation" (`all=true` includes earlier entries still in the buffer).
 
 ## API Reference
 
-All endpoints accept `tabId`. Pass it always; without it Seebro uses the first tab. GET endpoints take query parameters, POST endpoints a JSON body.
+All endpoints accept `tabId`. Without it, the last tab used is taken. GET endpoints take query parameters, POST endpoints a JSON body. Errors are `{"error": "…"}`.
 
 ### Reading State
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /health` | Check connection status |
-| `GET /tabs` | List open browser tabs (with lock owner and open dialog) |
-| `GET /snapshot` | Get accessibility tree |
-| `GET /text` | Extract readable content (`mode=raw` for full `innerText`) |
-| `GET /screenshot` | JPEG/PNG/WebP image: viewport, `fullPage=true`, or one element via `ref`/`selector` |
-| `GET /element` | Attributes, text, value, box, visibility, `html=true`, `styles=true\|all` |
-| `GET /cookies` | Retrieve cookies |
-| `GET /stealth/status` | Check stealth configuration |
+| `GET /health` | Connection status |
+| `GET /tabs` | Open tabs with lock owner, open dialog, health and context |
+| `GET /snapshot` | Elements with refs (see options below) |
+| `GET /text` | Page text: `mode=readability\|markdown\|raw`, `maxChars`, `offset` (returns `nextOffset`) |
+| `GET /screenshot` | Image: `format=jpeg\|png\|webp`, `quality`, `fullPage`, `ref`/`selector`, `maxDim`, `maxHeight`, `raw=true`, `output=file&path=` |
+| `GET /element` | One element: attributes, text, value, box, visibility, `html=true`, `styles=true\|all` |
+| `GET /cookies` | Cookies of the current page (`url`, `name`) |
+| `GET /stealth/status` | Live bot-detection self-check with score |
 
 ### Taking Actions
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /navigate` | Load a URL, or `"type": "back" \| "forward" \| "reload"` |
+| `POST /navigate` | `url`, or `type: back\|forward\|reload`; `waitUntil: domcontentloaded\|load\|networkidle`; `newTab` (+ `context`) |
 | `POST /action` | Single action (kinds below) |
-| `POST /actions` | Batch multiple actions (`stopOnError`) |
-| `POST /evaluate` | Run JavaScript; promises are awaited; with `ref`/`selector` runs `el => …` |
-| `POST /wait` | Wait for `text` (one or many), `selector` (or `gone`), `url`, `networkIdle`; 408 on timeout |
-| `POST /tab` | `new`, `close` or `focus` a tab |
-| `POST /tab/lock` | Reserve tab for exclusive use |
-| `POST /tab/unlock` | Release tab reservation |
+| `POST /actions` | Several actions (`stopOnError`) |
+| `POST /evaluate` | JavaScript; promises awaited; with `ref`/`selector` runs `el => …` |
+| `POST /wait` | `text` (one or many), `selector` (or `gone`), `url`, `networkIdle`, `timeout`; 408 on timeout |
+| `POST /tab` | `new` (+ `url`, `context`), `close`, `focus`, `reset` |
+| `POST /tab/lock`, `/tab/unlock` | Reserve a tab; others get 423 until it is released or expires |
 | `POST /cookies` | Set cookies |
-| `POST /fingerprint/rotate` | Change browser fingerprint |
+| `POST /fingerprint/rotate` | New user agent, platform, screen, CPU cores |
 | `POST /shutdown` | Graceful shutdown |
 
 **Action kinds** for `/action` and `/actions`:
@@ -281,12 +296,12 @@ All endpoints accept `tabId`. Pass it always; without it Seebro uses the first t
 | Kind | Does |
 |---|---|
 | `click`, `dblclick` | Click / double-click by `ref` or `selector` |
-| `clickAt` | Click at `x`/`y` viewport coordinates (`count` for multi-click) |
-| `type` | Focus and send real key events (`text`) |
-| `fill` | Set value of input, textarea, select, checkbox/radio or contenteditable and fire input/change events |
+| `clickAt` | Click at `x`/`y` (`count` for multi-click) |
+| `type` | Focus and type `text` (fast insert, last key as a real key press) |
+| `fill` | Set value of input, textarea, select, checkbox/radio or contenteditable with input/change events |
 | `press` | Key names and combos: `Enter`, `Tab`, `Escape`, `ArrowDown`, `Control+A`, `Meta+Shift+K` |
 | `focus`, `hover`, `select`, `scroll` | As named (`scrollX`/`scrollY` for page scroll) |
-| `drag` | From `ref`/`selector` to `toRef`/`toSelector` or `x`/`y` (HTML5 drag & drop and mouse-based) |
+| `drag` | From `ref`/`selector` to `toRef`/`toSelector` or `x`/`y` |
 | `upload` | Set `files` on an `<input type=file>` |
 | `humanClick`, `humanType` | Human-like mouse path / typing rhythm |
 
@@ -295,61 +310,68 @@ All endpoints accept `tabId`. Pass it always; without it Seebro uses the first t
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /network` | Requests since the last navigation; filter by `type`, `filter` (URL), `method`, `status` (`2xx`, `4xx`, `failed`, `404`); `headers=true`, `limit`, `offset`, `all` |
-| `GET /network/request` | One request by `id`: headers, POST data, response body (`maxBytes`, `saveTo`, `base64`) |
-| `POST /network/clear` | Reset a tab's network log |
-| `GET /console` | Console messages, uncaught exceptions, browser log (`level`, `limit`, `all`) |
-| `POST /console/clear` | Reset a tab's console log |
-| `GET /dialog` | Currently open JS dialog |
-| `POST /dialog` | `accept` / `dismiss` it (`promptText` for `prompt()`) |
+| `GET /network/request` | One request by `id`: headers, POST data, body (`maxBytes`, `saveTo`, `base64`) |
+| `GET /network/websocket` | WebSocket frames and SSE events (`filter`, `dir=sent\|received\|sse`, `limit`) |
+| `GET /network/har` | HAR 1.2 export (`bodies=true`, `path=…har`) |
+| `POST /network/clear`, `POST /console/clear` | Reset a tab's logs |
+| `GET /console` | Console messages, exceptions, browser log (`level`, `limit`, `all`) |
+| `GET /dialog`, `POST /dialog` | Open JS dialog; `accept` / `dismiss` (`promptText`) |
 | `POST /emulate` | `viewport` (`390x844x3,mobile,touch`), `userAgent`, `colorScheme`, `reducedMotion`, `geolocation`, `network` (`Slow 3G` … `Offline`), `cpuThrottling`, `extraHeaders`, `timezone`, `locale` |
-| `GET /pdf` | Print page to PDF (`path`, `landscape`, `printBackground`) |
-| `GET /downloads` | Downloads with progress and files in the download folder |
+| `GET /performance` | TTFB, FCP, LCP, CLS, load, plus JS heap, DOM nodes, layout counts |
+| `GET /pdf` | Print to PDF (`path`, `landscape`, `printBackground`) |
+| `GET /downloads` | Downloads and files in the download folder |
+| `GET /contexts`, `POST /context` | List isolated contexts; `close` one (and its tabs) |
 | `POST /mcp` | MCP endpoint (Streamable HTTP, JSON-RPC) |
-
-Actions and `/evaluate` return immediately with a `dialog` field when an `alert`/`confirm` blocks the page, instead of hanging until the timeout.
 
 ### Snapshot Options
 
 | Parameter | Effect |
 |-----------|--------|
-| `filter=interactive` | Only buttons, links, inputs (~75% fewer tokens) |
-| `format=compact` | Minimal one-line-per-node output |
-| `format=text` | Indented tree format |
-| `format=yaml` | YAML output |
-| `diff=true` | Only changed elements since last call |
-| `depth=N` | Limit tree depth |
-| `selector=CSS` | Scope to element subtree |
-| `maxTokens=N` | Truncate to token budget |
-| `output=file` | Save to disk (`path=` for a custom location) |
+| `filter=interactive` | Interactive elements from the in-page engine (recommended) |
+| `viewport=true` | Only elements currently on screen |
+| `links=true` | Add link URLs |
+| `diff=true` | Only elements added, changed or removed since the last snapshot |
+| `selector=CSS` | Only inside this element |
+| `maxNodes=N` | Stop after N elements (default 5000) |
+| `maxTokens=N` | Truncate to a token budget |
+| `format=compact\|text\|yaml` | Output format (JSON by default) |
+| `filter` omitted / `engine=ax` | Chrome's accessibility tree (`depth=N` to limit) |
+| `output=file`, `path=` | Save to disk |
 
 ## Configuration
 
-Environment variables control behavior (a config file at `~/.seebro/config.json` is also supported, see `seebro config init`):
+Environment variables (a config file at `~/.seebro/config.json` is also supported, see `seebro config init`):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `BRIDGE_PORT` | `9867` | Server port |
-| `BRIDGE_TOKEN` | – | Auth token (set this in production!) |
-| `BRIDGE_HEADLESS` | `false` | Run without visible window (`seebro mcp` autostart: `true`) |
-| `BRIDGE_PROFILE` | `~/.seebro/chrome-profile` | Browser profile location |
+| `BRIDGE_BIND` | `127.0.0.1` | Listen address. Anything but loopback requires a token (generated if unset) |
+| `BRIDGE_TOKEN` | – | Bearer token |
+| `BRIDGE_ALLOWED_ORIGINS` | – | Web origins allowed to call the API from a browser (comma-separated) |
+| `BRIDGE_ALLOWED_HOSTS` | – | Extra `Host` names accepted on loopback (reverse proxies) |
+| `BRIDGE_HEADLESS` | `false` | Run without a window (`seebro mcp` autostart: `true`) |
+| `BRIDGE_PROFILE` | `~/.seebro/chrome-profile` | Browser profile |
 | `BRIDGE_STATE_DIR` | `~/.seebro` | Logs, screenshots, PDFs, saved state |
-| `BRIDGE_STEALTH` | `light` | Stealth level: `light` or `full` |
-| `BRIDGE_BLOCK_IMAGES` | `false` | Skip image loading |
-| `BRIDGE_BLOCK_MEDIA` | `false` | Skip images, fonts, CSS and media |
-| `BRIDGE_NO_ANIMATIONS` | `false` | Freeze CSS animations |
-| `BRIDGE_NO_RESTORE` | `false` | Don't reopen the previous session's tabs |
-| `BRIDGE_TIMEZONE` | – | Timezone override for all tabs |
-| `BRIDGE_DOWNLOAD_DIR` | `~/.seebro/downloads` | Where downloads are saved |
-| `BRIDGE_DIALOG` | – | `accept` / `dismiss` to auto-answer JS dialogs (default: leave open for `/dialog`) |
-| `BRIDGE_NETWORK_BUFFER` | `300` | Network requests kept per tab |
+| `BRIDGE_STEALTH` | `light` | `light` or `full` (adds fingerprint noise) |
+| `BRIDGE_SITE_ISOLATION` | `false` | `true` keeps Chrome's site isolation (cross-origin iframes become unreachable) |
+| `BRIDGE_LEAN` | `true` | `false` keeps Chrome's background services |
+| `BRIDGE_TAB_IDLE` | `30m` headless, off headed | Close tabs unused for this long (`0` = never) |
+| `BRIDGE_RESTORE` | `false` headless, `true` headed | Reopen the last session's tabs |
+| `BRIDGE_DIALOG` | – | `accept` / `dismiss` answers JS dialogs automatically |
+| `BRIDGE_DOWNLOAD_DIR` | `~/.seebro/downloads` | Download folder |
+| `BRIDGE_NETWORK_BUFFER` | `300` | Requests kept per tab |
 | `BRIDGE_CONSOLE_BUFFER` | `200` | Console messages kept per tab |
-| `CDP_URL` | – | Connect to existing Chrome instance |
-| `CHROME_BINARY` | – | Path to Chrome/Chromium |
-| `CHROME_FLAGS` | – | Extra Chrome flags (space-separated) |
+| `BRIDGE_BLOCK_IMAGES` / `BRIDGE_BLOCK_MEDIA` | `false` | Skip images / all media |
+| `BRIDGE_NO_ANIMATIONS` | `false` | Freeze CSS animations |
+| `BRIDGE_TIMEZONE` | – | Timezone for all tabs |
+| `BRIDGE_LOG_LEVEL` | `info` | `debug` also logs every successful request |
+| `CDP_URL` | – | Use an already running Chrome |
+| `CHROME_BINARY`, `CHROME_FLAGS` | – | Chrome path, extra flags |
 | `SEEBRO_URL` | `http://127.0.0.1:$BRIDGE_PORT` | Server used by `seebro mcp` |
 | `SEEBRO_NO_AUTOSTART` | – | `true` stops `seebro mcp` from launching a server |
+| `SEEBRO_OWNER` | `mcp-<pid>` | Identity of an MCP session for tab locks |
 
-Full list in the [configuration docs](docs/ARCHITECTURE.md).
+More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Commands
 
@@ -362,14 +384,14 @@ Full list in the [configuration docs](docs/ARCHITECTURE.md).
 
 ## Stealth Mode
 
-Seebro patches common automation fingerprints:
+Automation signals are removed at the browser level, where they leave no JavaScript traces:
 
-- Removes `navigator.webdriver` flag
-- Spoofs realistic plugins and languages
-- Hides CDP artifacts
-- Optional: canvas noise, WebGL vendor spoofing, font metric fuzzing
+- `navigator.webdriver` is `false`, as in a normal Chrome (`--disable-blink-features=AutomationControlled`)
+- user agent and client hints say `Chrome`, not `HeadlessChrome`
+- real plugins, mime types and `window.chrome` (new headless mode)
+- the injected script lives in a closure (no globals), and every override keeps native descriptors and `toString()`
 
-`light` mode (default) handles most sites. `full` mode adds fingerprint randomization but can break some pages.
+`light` (default) changes nothing else. `full` adds seeded canvas, WebGL and font noise, WebRTC relay and hardware values that stay stable within a session. `GET /stealth/status` runs the same checks bot detectors use and scores them. On bot.sannysoft.com every check passes.
 
 ## Architecture
 
@@ -380,19 +402,23 @@ Seebro patches common automation fingerprints:
 └─────────────┘                  └──────────┘                  └─────────┘
 ```
 
-Seebro is a translation layer. Agents speak HTTP or MCP, Chrome speaks CDP. Seebro handles the conversion, adds stealth, records network and console activity, manages sessions, and compresses output to save tokens.
+Seebro is a translation layer. Agents speak HTTP or MCP, Chrome speaks CDP. Seebro adds an in-page snapshot engine, records network and console activity, handles stealth, sessions and tab health, and compresses everything to save tokens. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Security Notice
 
-**Seebro gives agents real browser access with your real accounts.**
+**Seebro gives agents real browser access with your real accounts.** Anyone who can call it can act as you: read messages, make purchases, read cookies and auth headers from the network log.
 
-When you log into sites, those sessions persist. Any agent with Seebro access can act as you – read messages, make purchases, access sensitive data. The network log can contain auth headers and the cookies tools expose session cookies.
+What Seebro does for you:
+- listens on **127.0.0.1** only, unless you set `BRIDGE_BIND`; then a token is mandatory and generated if missing
+- **rejects requests from web pages** (any `Origin` or cross-site `Sec-Fetch-Site` not explicitly allowed) and foreign `Host` headers, so a site you visit can't drive Seebro through your browser (CSRF, DNS rebinding)
+- answers CORS only for origins you allow — never `*`
+- refuses to write output files into hidden files or folders (`~/.ssh`, dotfiles) outside its state directory
+- enforces tab locks between agents
 
-Essential precautions:
-- **Set `BRIDGE_TOKEN`** – without it, anyone on your network has access (this includes `/mcp`)
-- **Treat `~/.seebro/` as sensitive** – it contains your browser profile and downloads
-- **Start with test accounts** – don't connect production accounts until you trust your agent
-- **Firewall appropriately** – Seebro binds to all interfaces by default
+What you should do:
+- set `BRIDGE_TOKEN` if other users or containers share the machine
+- treat `~/.seebro/` as sensitive — it contains your browser profile
+- start with test accounts until you trust your agent
 
 Think of it as handing someone an unlocked laptop. Powerful when intentional. Dangerous when careless.
 
@@ -437,11 +463,11 @@ Seebro works natively with [OpenClaw](https://openclaw.ai), the open-source AI a
 ---
 
 <p align="center">
-  <a href="https://star-history.com/#seebro/seebro&Date">
+  <a href="https://star-history.com/#ChrisFeldmeier/seebro&Date">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=seebro/seebro&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=seebro/seebro&type=Date" />
-      <img alt="Star History" src="https://api.star-history.com/svg?repos=seebro/seebro&type=Date" width="600"/>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ChrisFeldmeier/seebro&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ChrisFeldmeier/seebro&type=Date" />
+      <img alt="Star History" src="https://api.star-history.com/svg?repos=ChrisFeldmeier/seebro&type=Date" width="600"/>
     </picture>
   </a>
 </p>
