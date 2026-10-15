@@ -445,6 +445,13 @@ func mcpTools() []mcpTool {
 				"maxDim":   pNum("Longest image side in pixels (default 1568 when returned inline)"),
 				"path":     pStr("Save to this file path instead of returning the image"),
 			})), Annotations: readOnly, run: screenshotTool},
+		{Name: "screencast_start", Description: "Start recording the tab as a video. Clicks and typing are highlighted in the recording. Stop with screencast_stop.",
+			InputSchema: obj(withTab(map[string]any{
+				"path": pStr("Output .mp4 path (default ~/.seebro/videos/…)"), "maxWidth": pNum("Max frame width (default 1280)"),
+				"maxHeight": pNum("Max frame height (default 800)"), "quality": pNum("JPEG quality of frames (default 70)"),
+			})), Annotations: sideEffects, run: postTool("/screencast/start", nil)},
+		{Name: "screencast_stop", Description: "Stop recording and write the MP4 (real-time, needs ffmpeg). Returns the file path.",
+			InputSchema: obj(withTab(map[string]any{})), Annotations: sideEffects, run: postTool("/screencast/stop", nil)},
 		{Name: "inspect_element", Description: "Details of one element: tag, attributes, text, value, bounding box, visibility; optionally outerHTML and computed styles.",
 			InputSchema: obj(withTarget(map[string]any{
 				"html":   pBool("Include outerHTML (max 20KB)"),

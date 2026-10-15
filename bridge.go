@@ -51,6 +51,8 @@ type Bridge struct {
 	alt           altEngine                    // secondary obscura next to Chrome (lazy)
 	altInitial    string                       // initial tab of the secondary engine; never closed
 	tabEngine     map[string]string            // tabID → engine for tabs not on the primary engine
+	recorders     map[string]*recorder         // tabs being screencast
+	recStop       map[string]context.CancelFunc
 	mu            sync.RWMutex
 }
 
@@ -309,6 +311,11 @@ func (b *Bridge) CloseTab(tabID string) error {
 	delete(b.monitors, tabID)
 	delete(b.refs, tabID)
 	delete(b.tabEngine, tabID)
+	if stop := b.recStop[tabID]; stop != nil {
+		stop()
+	}
+	delete(b.recorders, tabID)
+	delete(b.recStop, tabID)
 	if b.active == tabID {
 		b.active = ""
 	}

@@ -69,6 +69,7 @@ func main() {
 	// Browser engine: Chrome (default), or obscura as a Chrome-free sidecar.
 	bridge.primary = primaryEngine()
 	bridge.tabEngine = make(map[string]string)
+	bridge.recStop = make(map[string]context.CancelFunc)
 	if bridge.primary == engineObscura && cdpURL == "" {
 		proc, err := startObscura()
 		if err != nil {
@@ -365,6 +366,8 @@ func main() {
 	mux.HandleFunc("GET /network/websocket", bridge.handleWebSocket)
 	mux.HandleFunc("GET /network/har", bridge.handleHAR)
 	mux.HandleFunc("GET /performance", bridge.handlePerformance)
+	mux.HandleFunc("POST /screencast/start", bridge.handleScreencastStart)
+	mux.HandleFunc("POST /screencast/stop", bridge.handleScreencastStop)
 	mux.HandleFunc("GET /contexts", bridge.handleContexts)
 	mux.HandleFunc("POST /context", bridge.handleContext)
 

@@ -85,6 +85,7 @@ Seebro can drive two browsers. Chrome is the default and supports everything. `t
 - `network_requests {tabId, status: "failed"}` lists failed requests and HTTP errors.
 - `emulate` sets viewport (`"390x844x3,mobile,touch"`), `colorScheme`, `network` throttling, `geolocation`, `timezone`, `locale` and `userAgent`. Reset each with `"reset"`, `"auto"` or `""`.
 - `performance_metrics {tabId}` gives TTFB, FCP, LCP, CLS and load time.
+- To show a human what you did, wrap the steps in `screencast_start {tabId, path}` … `screencast_stop {tabId}`: you get a real-time MP4 with every click and input highlighted.
 - If a page is slow: `navigate {waitUntil: "networkidle"}`, `navigate {type: "reload"}`, or `wait_for` with a longer `timeout` (max 60000 ms).
 - If a call says the tab is unresponsive (hung or crashed page), `tab_reset {tabId}` gives you a fresh tab at the same URL.
 - Another agent's `tab_lock` blocks changes to a tab; use your own tab instead.

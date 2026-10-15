@@ -9,6 +9,11 @@
 - obscura-specific paths: single-round-trip main-world snapshot in lite mode, structural text walker, no frame/box-model calls, in-page download of `<a download>` links
 - `scripts/install-obscura.sh` (release download or build from source)
 
+### Screen recording
+- `POST /screencast/start` / `/screencast/stop` and MCP `screencast_start` / `screencast_stop`: frames from `Page.startScreencast` with arrival times, encoded to a real-time MP4 with ffmpeg (libx264, mpeg4 fallback)
+- Clicks and typing are outlined and labelled in the page while a tab records
+- `scripts/demo-wikipedia.py`: automated Wikipedia tour that produces a video
+
 ### Fixes found on the way
 - `wait_for` with only a selector always timed out (empty text list encoded as `null`)
 - Snapshot engine and text extraction no longer rely on iterable DOM collections or `selectedOptions`; a single-select without explicit selection reports its first option

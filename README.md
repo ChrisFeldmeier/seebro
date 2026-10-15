@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
   <img src="https://img.shields.io/badge/~9MB_binary-FFD700?style=flat-square" alt="~9MB"/>
   <img src="https://img.shields.io/badge/REST_API-00ff88?style=flat-square" alt="REST"/>
-  <img src="https://img.shields.io/badge/MCP-43_tools-7c3aed?style=flat-square" alt="MCP"/>
+  <img src="https://img.shields.io/badge/MCP-45_tools-7c3aed?style=flat-square" alt="MCP"/>
   <img src="https://img.shields.io/badge/MIT-888?style=flat-square" alt="MIT"/>
 </p>
 
@@ -45,14 +45,14 @@ claude mcp add seebro -- seebro mcp
 | **Navigation** | Load URLs, back / forward / reload, `waitUntil` load / network idle, wait for text / element / URL (reacts instantly to DOM changes), multiple tabs |
 | **DevTools** | Network log with headers, POST data and response bodies, **WebSocket and Server-Sent Events**, console and uncaught exceptions, JS dialogs, **HAR export**, **performance metrics and Web Vitals** |
 | **Emulation** | Mobile viewports and touch, dark mode, reduced motion, geolocation, network and CPU throttling, user agent, extra headers, timezone, locale |
-| **Output** | Screenshots (JPEG/PNG/WebP; viewport, full page or element; auto-scaled for LLMs), PDF export, downloads (CSV/PDF exports land in a known folder) |
+| **Output** | Screenshots (JPEG/PNG/WebP; viewport, full page or element; auto-scaled for LLMs), **screen recording to MP4** with highlighted clicks, PDF export, downloads (CSV/PDF exports land in a known folder) |
 | **Scripting** | JavaScript in the page with awaited promises: `fetch('/api/…')` runs with the page's own login |
 | **Sessions** | Persistent Chrome profile (logins survive restarts), cookies, **isolated incognito-like contexts** for parallel agents or second accounts |
 | **Multi-agent** | One shared browser for all MCP clients, tab locks that are actually enforced, per-session identity |
 | **Robustness** | Hung or crashed tabs are detected and can be reset; idle tabs are closed automatically; JS dialogs never block a call |
 | **Stealth** | Passes common bot checks: no `webdriver` flag, no "HeadlessChrome" in user agent or client hints, real plugins, native-looking overrides, live self-check |
 | **Security** | Loopback by default, web pages can't reach the API (CSRF/DNS-rebinding guard), token enforced beyond loopback |
-| **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 43 tools), Claude skill |
+| **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 45 tools), Claude skill |
 
 ## How It Compares
 
@@ -195,7 +195,7 @@ claude mcp add --transport http seebro http://localhost:9867/mcp \
 | **Input** | `click` (incl. double / human-like), `click_at`, `type_text` (with `submitKey`), `fill`, `fill_form`, `press_key`, `hover`, `select_option`, `scroll`, `drag`, `upload_file`, `batch_actions` |
 | **Scripting** | `evaluate` (awaits promises; `el => …` on a ref/selector) |
 | **Network & console** | `network_requests`, `network_request`, `websocket_messages`, `export_har`, `console_messages`, `clear_logs`, `handle_dialog` |
-| **Emulation & output** | `emulate`, `performance_metrics`, `save_pdf`, `downloads` |
+| **Emulation & output** | `emulate`, `performance_metrics`, `screencast_start`, `screencast_stop`, `save_pdf`, `downloads` |
 | **Session** | `cookies_get`, `cookies_set` |
 | **Status & stealth** | `health`, `stealth_status`, `fingerprint_rotate` |
 
@@ -215,6 +215,14 @@ cp -r skill/seebro ~/.claude/skills/seebro
 ```
 
 The HTTP equivalent of every tool is in [`skill/seebro/references/http-api.md`](skill/seebro/references/http-api.md).
+
+### Example: record a video
+
+`scripts/demo-wikipedia.py` searches Wikipedia, scrolls, follows two links and goes back, while recording:
+
+```bash
+python3 scripts/demo-wikipedia.py --out ~/Desktop/seebro-wikipedia.mp4
+```
 
 ### Example: pull JSON out of a web app
 
@@ -347,6 +355,7 @@ All endpoints accept `tabId`. Without it, the last tab used is taken. GET endpoi
 | `POST /emulate` | `viewport` (`390x844x3,mobile,touch`), `userAgent`, `colorScheme`, `reducedMotion`, `geolocation`, `network` (`Slow 3G` … `Offline`), `cpuThrottling`, `extraHeaders`, `timezone`, `locale` |
 | `GET /performance` | TTFB, FCP, LCP, CLS, load, plus JS heap, DOM nodes, layout counts |
 | `GET /pdf` | Print to PDF (`path`, `landscape`, `printBackground`) |
+| `POST /screencast/start`, `POST /screencast/stop` | Record the tab as a real-time MP4 (needs ffmpeg); clicks and typing are highlighted while recording (`path`, `maxWidth`, `maxHeight`, `quality`) |
 | `GET /downloads` | Downloads and files in the download folder |
 | `GET /contexts`, `POST /context` | List isolated contexts; `close` one (and its tabs) |
 | `POST /mcp` | MCP endpoint (Streamable HTTP, JSON-RPC) |

@@ -251,6 +251,7 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	b.highlightForRecording(actCtx, resolvedTabID, req)
 	result, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(actCtx, req) })
 	if err != nil {
 		b.failTab(w, resolvedTabID, fmt.Errorf("action %s: %w", req.Kind, err))
@@ -359,6 +360,7 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		b.highlightForRecording(actCtx, resolvedTabID, action)
 		actionRes, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(actCtx, action) })
 		tCancel()
 
