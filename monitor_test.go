@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -22,11 +23,11 @@ func reqEvent(id, url string, typ network.ResourceType, frame string) *network.E
 func TestMonitor_RequestLifecycle(t *testing.T) {
 	m := newTabMonitor()
 	m.mainFrame = "F"
-	m.handleEvent(nil, reqEvent("1", "https://a.test/", network.ResourceTypeDocument, "F"))
-	m.handleEvent(nil, reqEvent("2", "https://a.test/api", network.ResourceTypeFetch, "F"))
-	m.handleEvent(nil, &network.EventResponseReceived{RequestID: "2", Response: &network.Response{Status: 201, MimeType: "application/json"}})
-	m.handleEvent(nil, &network.EventLoadingFinished{RequestID: "2", EncodedDataLength: 42})
-	m.handleEvent(nil, reqEvent("3", "data:image/png;base64,xx", network.ResourceTypeImage, "F"))
+	m.handleEvent(context.TODO(), reqEvent("1", "https://a.test/", network.ResourceTypeDocument, "F"))
+	m.handleEvent(context.TODO(), reqEvent("2", "https://a.test/api", network.ResourceTypeFetch, "F"))
+	m.handleEvent(context.TODO(), &network.EventResponseReceived{RequestID: "2", Response: &network.Response{Status: 201, MimeType: "application/json"}})
+	m.handleEvent(context.TODO(), &network.EventLoadingFinished{RequestID: "2", EncodedDataLength: 42})
+	m.handleEvent(context.TODO(), reqEvent("3", "data:image/png;base64,xx", network.ResourceTypeImage, "F"))
 
 	all, total := m.Requests(netFilter{})
 	if total != 2 || len(all) != 2 {
@@ -36,7 +37,7 @@ func TestMonitor_RequestLifecycle(t *testing.T) {
 	if api.Status != 201 || api.Size != 42 || !api.Done || api.ID != "r2" {
 		t.Errorf("unexpected entry %+v", api)
 	}
-	if !(m.inflight == 1) {
+	if m.inflight != 1 {
 		t.Errorf("document still in flight, inflight=%d", m.inflight)
 	}
 
@@ -56,10 +57,10 @@ func TestMonitor_RequestLifecycle(t *testing.T) {
 func TestMonitor_NavigationScopesRequests(t *testing.T) {
 	m := newTabMonitor()
 	m.mainFrame = "F"
-	m.handleEvent(nil, reqEvent("1", "https://a.test/", network.ResourceTypeDocument, "F"))
-	m.handleEvent(nil, reqEvent("2", "https://a.test/x.js", network.ResourceTypeScript, "F"))
-	m.handleEvent(nil, reqEvent("3", "https://iframe.test/", network.ResourceTypeDocument, "CHILD"))
-	m.handleEvent(nil, reqEvent("4", "https://b.test/", network.ResourceTypeDocument, "F"))
+	m.handleEvent(context.TODO(), reqEvent("1", "https://a.test/", network.ResourceTypeDocument, "F"))
+	m.handleEvent(context.TODO(), reqEvent("2", "https://a.test/x.js", network.ResourceTypeScript, "F"))
+	m.handleEvent(context.TODO(), reqEvent("3", "https://iframe.test/", network.ResourceTypeDocument, "CHILD"))
+	m.handleEvent(context.TODO(), reqEvent("4", "https://b.test/", network.ResourceTypeDocument, "F"))
 
 	cur, _ := m.Requests(netFilter{})
 	if len(cur) != 1 || cur[0].URL != "https://b.test/" {
@@ -73,10 +74,10 @@ func TestMonitor_NavigationScopesRequests(t *testing.T) {
 
 func TestMonitor_Redirect(t *testing.T) {
 	m := newTabMonitor()
-	m.handleEvent(nil, reqEvent("1", "http://a.test/", network.ResourceTypeDocument, ""))
+	m.handleEvent(context.TODO(), reqEvent("1", "http://a.test/", network.ResourceTypeDocument, ""))
 	ev := reqEvent("1", "https://a.test/", network.ResourceTypeDocument, "")
 	ev.RedirectResponse = &network.Response{Status: 301}
-	m.handleEvent(nil, ev)
+	m.handleEvent(context.TODO(), ev)
 	reqs, _ := m.Requests(netFilter{all: true})
 	if len(reqs) != 2 || reqs[0].Status != 301 || !reqs[0].Done || reqs[1].URL != "https://a.test/" {
 		t.Errorf("redirect chain: %+v", reqs)
@@ -91,7 +92,7 @@ func TestMonitor_RingBuffer(t *testing.T) {
 	m.netMax, m.consoleMax = 5, 3
 	for i := 0; i < 20; i++ {
 		id := itoa(int64(i))
-		m.handleEvent(nil, reqEvent(id, "https://a.test/"+id, network.ResourceTypeFetch, ""))
+		m.handleEvent(context.TODO(), reqEvent(id, "https://a.test/"+id, network.ResourceTypeFetch, ""))
 		m.addConsole("log", "console", "msg "+id, "", 0)
 	}
 	reqs, total := m.Requests(netFilter{all: true})
@@ -113,12 +114,12 @@ func TestMonitor_RingBuffer(t *testing.T) {
 func TestMonitor_Console(t *testing.T) {
 	m := newTabMonitor()
 	str, _ := json.Marshal("hello")
-	m.handleEvent(nil, &runtime.EventConsoleAPICalled{Type: runtime.APITypeWarning, Args: []*runtime.RemoteObject{
+	m.handleEvent(context.TODO(), &runtime.EventConsoleAPICalled{Type: runtime.APITypeWarning, Args: []*runtime.RemoteObject{
 		{Type: runtime.TypeString, Value: str},
 		{Type: runtime.TypeNumber, Value: []byte("42")},
 		{Type: runtime.TypeObject, Description: "Object"},
 	}})
-	m.handleEvent(nil, &runtime.EventExceptionThrown{ExceptionDetails: &runtime.ExceptionDetails{
+	m.handleEvent(context.TODO(), &runtime.EventExceptionThrown{ExceptionDetails: &runtime.ExceptionDetails{
 		Text: "Uncaught", Exception: &runtime.RemoteObject{Description: "Error: boom"}, LineNumber: 9,
 	}})
 	msgs, _ := m.Console(false, nil, 0)
@@ -144,7 +145,7 @@ func TestMonitor_NetworkIdle(t *testing.T) {
 	if !m.NetworkIdle(0, 500*time.Millisecond) {
 		t.Error("quiet monitor should be idle")
 	}
-	m.handleEvent(nil, reqEvent("1", "https://a.test/", network.ResourceTypeFetch, ""))
+	m.handleEvent(context.TODO(), reqEvent("1", "https://a.test/", network.ResourceTypeFetch, ""))
 	if m.NetworkIdle(2, 500*time.Millisecond) {
 		t.Error("fresh activity should not be idle")
 	}

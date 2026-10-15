@@ -617,9 +617,10 @@ func (b *Bridge) handleElement(w http.ResponseWriter, r *http.Request) {
 
 	styles := q.Get("styles") // "", "true", "all"
 	var stylesArg any = false
-	if styles == "all" {
+	switch styles {
+	case "all":
 		stylesArg = "all"
-	} else if styles == "true" {
+	case "true":
 		stylesArg = true
 	}
 	res, err := callOnTarget(tCtx, nodeID, q.Get("selector"), elementInfoJS, q.Get("html") == "true", stylesArg)
