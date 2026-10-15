@@ -42,6 +42,7 @@ type Bridge struct {
 	refs          map[string]*frameRefs        // snapshot-engine worlds and frame indexes per tab
 	lastUsed      map[string]time.Time         // per tab, for idle-tab cleanup
 	initialTab    string                       // owns the browser connection; never closed
+	contexts      browserContexts              // named isolated browser contexts
 	active        string                       // last tab used explicitly; default for calls without tabId
 	userAgent     string                       // headless UA without "Headless" ("" when headed)
 	uaMeta        *emulation.UserAgentMetadata // matching client hints
@@ -187,10 +188,14 @@ func (b *Bridge) DeleteRefCache(tabID string) {
 
 // CreateTab opens a new tab, navigates to url, and returns its ID and context.
 func (b *Bridge) CreateTab(url string) (string, context.Context, context.CancelFunc, error) {
+	return b.createTab(url)
+}
+
+func (b *Bridge) createTab(url string, opts ...chromedp.ContextOption) (string, context.Context, context.CancelFunc, error) {
 	if b.browserCtx == nil {
 		return "", nil, nil, fmt.Errorf("no browser context available")
 	}
-	ctx, cancel := chromedp.NewContext(b.browserCtx)
+	ctx, cancel := chromedp.NewContext(b.browserCtx, opts...)
 	mon := b.attachMonitor(ctx, "")
 
 	// Inject stealth script before navigation so it applies to the first page load

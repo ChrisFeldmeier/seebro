@@ -68,6 +68,24 @@ type consoleEntry struct {
 	Nav    int    `json:"nav"`
 }
 
+// wsMessage is a WebSocket frame or Server-Sent Event.
+type wsMessage struct {
+	ID     int64  `json:"id"`
+	URL    string `json:"url"`
+	Dir    string `json:"dir"` // sent, received, sse, error, closed
+	Opcode int    `json:"opcode,omitempty"`
+	Event  string `json:"event,omitempty"` // SSE event name
+	Data   string `json:"data"`
+	Size   int    `json:"size"`
+	Time   string `json:"time"`
+	Nav    int    `json:"nav"`
+}
+
+const (
+	maxWSMessages = 200
+	maxWSData     = 4000
+)
+
 type dialogInfo struct {
 	Type          string `json:"type"`
 	Message       string `json:"message"`
@@ -89,6 +107,10 @@ type tabMonitor struct {
 	console    []*consoleEntry
 	consoleSeq int64
 	consoleMax int
+
+	ws     []*wsMessage
+	wsSeq  int64
+	wsURLs map[network.RequestID]string
 
 	dialog       *dialogInfo
 	viewport     *viewportState // device metrics set via /emulate
@@ -217,6 +239,28 @@ func (m *tabMonitor) handleEvent(ctx context.Context, ev any) {
 			n.FromCache = true
 		}
 		m.mu.Unlock()
+
+	case *network.EventWebSocketCreated:
+		m.mu.Lock()
+		if m.wsURLs == nil || len(m.wsURLs) > 100 {
+			m.wsURLs = map[network.RequestID]string{}
+		}
+		m.wsURLs[e.RequestID] = truncate(e.URL, maxURLLen)
+		m.mu.Unlock()
+	case *network.EventWebSocketFrameSent:
+		if e.Response != nil {
+			m.addWS(e.RequestID, "sent", int(e.Response.Opcode), "", e.Response.PayloadData)
+		}
+	case *network.EventWebSocketFrameReceived:
+		if e.Response != nil {
+			m.addWS(e.RequestID, "received", int(e.Response.Opcode), "", e.Response.PayloadData)
+		}
+	case *network.EventWebSocketFrameError:
+		m.addWS(e.RequestID, "error", 0, "", e.ErrorMessage)
+	case *network.EventWebSocketClosed:
+		m.addWS(e.RequestID, "closed", 0, "", "")
+	case *network.EventEventSourceMessageReceived:
+		m.addWS(e.RequestID, "sse", 0, e.EventName, e.Data)
 
 	case *runtime.EventConsoleAPICalled:
 		parts := make([]string, 0, len(e.Args))
@@ -366,6 +410,52 @@ func (m *tabMonitor) addConsole(level, source, text, url string, line int64) {
 	}
 }
 
+func (m *tabMonitor) addWS(id network.RequestID, dir string, opcode int, event, data string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	url := m.wsURLs[id]
+	if url == "" {
+		if n := m.netByID[id]; n != nil {
+			url = n.URL // EventSource connections are normal requests
+		}
+	}
+	m.wsSeq++
+	m.ws = append(m.ws, &wsMessage{
+		ID: m.wsSeq, URL: url, Dir: dir, Opcode: opcode, Event: event,
+		Data: truncate(data, maxWSData), Size: len(data),
+		Time: time.Now().Format("15:04:05.000"), Nav: m.nav,
+	})
+	if len(m.ws) > maxWSMessages {
+		copy(m.ws, m.ws[1:])
+		m.ws[len(m.ws)-1] = nil
+		m.ws = m.ws[:len(m.ws)-1]
+	}
+}
+
+// WebSocketMessages lists WebSocket frames and SSE events, newest last.
+func (m *tabMonitor) WebSocketMessages(all bool, urlSub, dir string, limit int) ([]wsMessage, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]wsMessage, 0)
+	for _, w := range m.ws {
+		if !all && w.Nav != m.nav {
+			continue
+		}
+		if urlSub != "" && !strings.Contains(strings.ToLower(w.URL), strings.ToLower(urlSub)) {
+			continue
+		}
+		if dir != "" && dir != w.Dir {
+			continue
+		}
+		out = append(out, *w)
+	}
+	total := len(out)
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, total
+}
+
 // netFilter selects entries for listing.
 type netFilter struct {
 	all     bool     // include previous navigations
@@ -451,6 +541,7 @@ func (m *tabMonitor) Clear(clearNet, clearConsole bool) {
 		m.net = nil
 		m.netByID = make(map[network.RequestID]*netEntry)
 		m.inflight = 0
+		m.ws = nil
 	}
 	if clearConsole {
 		m.console = nil

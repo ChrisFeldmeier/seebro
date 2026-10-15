@@ -232,9 +232,12 @@ func (b *Bridge) handleDialog(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, fmt.Errorf("action must be 'accept' or 'dismiss'"))
 		return
 	}
-	ctx, _, m, err := b.monitorFor(req.TabID)
+	ctx, tabID, m, err := b.monitorFor(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
+		return
+	}
+	if !b.checkLock(w, r, tabID) {
 		return
 	}
 	d := m.Dialog()
@@ -424,6 +427,9 @@ func (b *Bridge) handleEmulate(w http.ResponseWriter, r *http.Request) {
 	ctx, tabID, err := b.TabContext(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
+		return
+	}
+	if !b.checkLock(w, r, tabID) {
 		return
 	}
 	var actions []chromedp.Action

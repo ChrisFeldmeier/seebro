@@ -208,6 +208,9 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 404, err)
 		return
 	}
+	if !b.checkLock(w, r, resolvedTabID) {
+		return
+	}
 
 	tCtx, tCancel := context.WithTimeout(ctx, actionTimeout)
 	defer tCancel()
@@ -284,6 +287,9 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 404, err)
 		return
 	}
+	if !b.checkLock(w, r, resolvedTabID) {
+		return
+	}
 
 	results := make([]actionResult, 0, len(req.Actions))
 	registry := b.actions
@@ -293,6 +299,9 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 			action.TabID = resolvedTabID
 		} else if action.TabID != resolvedTabID {
 			ctx, resolvedTabID, err = b.TabContext(action.TabID)
+			if err == nil && b.locks != nil {
+				err = b.locks.CheckAccess(resolvedTabID, ownerOf(r))
+			}
 			if err != nil {
 				results = append(results, actionResult{
 					Index: i, Success: false,

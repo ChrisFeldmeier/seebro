@@ -153,6 +153,9 @@ func (b *Bridge) handleFingerprintRotate(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, 404, err)
 		return
 	}
+	if !b.checkLock(w, r, tabID) {
+		return
+	}
 
 	fp := generateFingerprint(req)
 

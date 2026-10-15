@@ -116,9 +116,12 @@ func (b *Bridge) handleSetCookies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, err := b.TabContext(req.TabID)
+	ctx, tabID, err := b.TabContext(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
+		return
+	}
+	if !b.checkLock(w, r, tabID) {
 		return
 	}
 

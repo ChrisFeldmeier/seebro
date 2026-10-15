@@ -336,6 +336,11 @@ func main() {
 	mux.HandleFunc("GET /pdf", bridge.handlePDF)
 	mux.HandleFunc("GET /element", bridge.handleElement)
 	mux.HandleFunc("GET /downloads", bridge.handleDownloads)
+	mux.HandleFunc("GET /network/websocket", bridge.handleWebSocket)
+	mux.HandleFunc("GET /network/har", bridge.handleHAR)
+	mux.HandleFunc("GET /performance", bridge.handlePerformance)
+	mux.HandleFunc("GET /contexts", bridge.handleContexts)
+	mux.HandleFunc("POST /context", bridge.handleContext)
 
 	// MCP endpoint: tools are dispatched in-process against the routes above.
 	mcpSrv := newMCPServer(&bridge, mux)

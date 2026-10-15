@@ -48,6 +48,9 @@ func (b *Bridge) handleTabs(w http.ResponseWriter, r *http.Request) {
 			"title": t.Title,
 			"type":  t.Type,
 		}
+		if name := b.contextName(t.BrowserContextID); name != "" {
+			entry["context"] = name
+		}
 		if lock := b.locks.Get(string(t.TargetID)); lock != nil {
 			entry["owner"] = lock.Owner
 			entry["lockedUntil"] = lock.ExpiresAt.Format(time.RFC3339)
@@ -279,6 +282,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 		Timeout     float64 `json:"timeout"`     // per-request navigate timeout in seconds (default: BRIDGE_NAV_TIMEOUT)
 		BlockImages *bool   `json:"blockImages"` // per-request override; nil = use global BRIDGE_BLOCK_IMAGES
 		BlockMedia  *bool   `json:"blockMedia"`  // block images + fonts + CSS + video/audio
+		Context     string  `json:"context"`     // newTab only: open in this isolated context
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
@@ -326,7 +330,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.NewTab {
-		newTargetID, newCtx, _, err := b.CreateTab(req.URL)
+		newTargetID, newCtx, _, err := b.CreateTabInContext(req.Context, req.URL)
 		if err != nil {
 			jsonErr(w, 500, fmt.Errorf("new tab: %w", err))
 			return
@@ -352,6 +356,9 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	ctx, resolvedTabID, err := b.TabContext(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
+		return
+	}
+	if !b.checkLock(w, r, resolvedTabID) {
 		return
 	}
 
@@ -405,6 +412,9 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 404, err)
 		return
 	}
+	if !b.checkLock(w, r, resolvedTabID) {
+		return
+	}
 
 	tCtx, tCancel := context.WithTimeout(ctx, actionTimeout)
 	defer tCancel()
@@ -449,9 +459,10 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Action string `json:"action"`
-		TabID  string `json:"tabId"`
-		URL    string `json:"url"`
+		Action  string `json:"action"`
+		TabID   string `json:"tabId"`
+		URL     string `json:"url"`
+		Context string `json:"context"` // new: open in this isolated context
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
@@ -460,7 +471,7 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case tabActionNew:
-		newTargetID, ctx, _, err := b.CreateTab(req.URL)
+		newTargetID, ctx, _, err := b.CreateTabInContext(req.Context, req.URL)
 		if err != nil {
 			jsonErr(w, 500, err)
 			return
@@ -475,6 +486,9 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, 400, fmt.Errorf("tabId required"))
 			return
 		}
+		if !b.checkLock(w, r, req.TabID) {
+			return
+		}
 
 		if err := b.CloseTab(req.TabID); err != nil {
 			jsonErr(w, 500, err)
@@ -485,6 +499,9 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 	case tabActionReset:
 		if req.TabID == "" {
 			jsonErr(w, 400, fmt.Errorf("tabId required"))
+			return
+		}
+		if !b.checkLock(w, r, req.TabID) {
 			return
 		}
 		newID, url, err := b.ResetTab(req.TabID)
@@ -523,6 +540,9 @@ func (b *Bridge) handleTabLock(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
 		return
 	}
+	if req.Owner == "" {
+		req.Owner = ownerOf(r)
+	}
 	if req.TabID == "" || req.Owner == "" {
 		jsonErr(w, 400, fmt.Errorf("tabId and owner required"))
 		return
@@ -556,6 +576,9 @@ func (b *Bridge) handleTabUnlock(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
 		return
+	}
+	if req.Owner == "" {
+		req.Owner = ownerOf(r)
 	}
 	if req.TabID == "" || req.Owner == "" {
 		jsonErr(w, 400, fmt.Errorf("tabId and owner required"))
@@ -593,6 +616,9 @@ func (b *Bridge) handleHistoryNav(w http.ResponseWriter, r *http.Request, tabID,
 	ctx, resolvedTabID, err := b.TabContext(tabID)
 	if err != nil {
 		jsonErr(w, 404, err)
+		return
+	}
+	if !b.checkLock(w, r, resolvedTabID) {
 		return
 	}
 	tCtx, tCancel := context.WithTimeout(ctx, navigateTimeout)
