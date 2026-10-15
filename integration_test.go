@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -28,6 +27,7 @@ func testBridge(t *testing.T) (*Bridge, func()) {
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"), // as in main.go
 	)
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
@@ -35,7 +35,8 @@ func testBridge(t *testing.T) (*Bridge, func()) {
 
 	// Inject stealth script with seed (mirrors main.go)
 	seed := rand.Intn(1000000000)
-	seededScript := fmt.Sprintf("var __seebro_seed = %d;\n", seed) + stealthScript
+	// Full level so the fingerprint-noise tests below have something to measure.
+	seededScript := buildStealthScript(seed, "full")
 	if err := chromedp.Run(browserCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			_, err := page.AddScriptToEvaluateOnNewDocument(seededScript).Do(ctx)
@@ -86,7 +87,7 @@ func TestStealthScriptInjected(t *testing.T) {
 	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// navigator.webdriver is set to undefined by stealth script, not false
+	// navigator.webdriver must be false like in a normal Chrome (undefined is detectable)
 	var result string
 	if err := chromedp.Run(tCtx, chromedp.Evaluate(`String(navigator.webdriver)`, &result)); err != nil {
 		t.Fatalf("evaluate: %v", err)
@@ -94,9 +95,8 @@ func TestStealthScriptInjected(t *testing.T) {
 	if result == "true" {
 		t.Error("navigator.webdriver should not be true (stealth script not working)")
 	}
-	// Accept "undefined" or "false" — both indicate stealth is working
-	if result != "undefined" && result != "false" {
-		t.Errorf("navigator.webdriver = %q, want 'undefined' or 'false'", result)
+	if result != "false" {
+		t.Errorf("navigator.webdriver = %q, want 'false'", result)
 	}
 }
 
@@ -121,24 +121,29 @@ ctx.fillText('canvas fingerprint', 10, 30);
 	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// Get two toDataURL calls — stealth noise should make them differ
-	var result1, result2 string
+	// Noise must be present (some pure-red pixels shifted to R=254) and
+	// stable: a real device returns the same canvas every time, and
+	// detectors render twice to spot per-call randomness.
+	var res struct {
+		Same    bool `json:"same"`
+		Shifted int  `json:"shifted"`
+	}
 	script := `
 (function() {
   var c = document.getElementById('c');
-  return c.toDataURL();
+  var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, n = 0;
+  for (var i = 0; i < d.length; i += 4) if (d[i] === 254 && d[i+1] === 0 && d[i+2] === 0) n++;
+  return {same: c.toDataURL() === c.toDataURL(), shifted: n};
 })()
 `
-	if err := chromedp.Run(tCtx,
-		chromedp.Evaluate(script, &result1),
-		chromedp.Evaluate(script, &result2),
-	); err != nil {
+	if err := chromedp.Run(tCtx, chromedp.Evaluate(script, &res)); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-
-	// Canvas noise adds random pixel changes per call
-	if result1 == result2 {
-		t.Error("toDataURL returned identical results — canvas noise not applied")
+	if res.Shifted == 0 {
+		t.Error("no noise pixels found — canvas noise not applied")
+	}
+	if !res.Same {
+		t.Error("toDataURL differs between calls — per-call randomness is detectable")
 	}
 }
 

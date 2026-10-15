@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cdp "github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
@@ -37,7 +38,10 @@ type Bridge struct {
 	stealthScript string                // injected on every new tab
 	actions       map[string]ActionFunc // cached action registry (built once)
 	locks         *lockManager
-	monitors      map[string]*tabMonitor // network/console/dialog recorders per tab
+	monitors      map[string]*tabMonitor       // network/console/dialog recorders per tab
+	active        string                       // last tab used explicitly; default for calls without tabId
+	userAgent     string                       // headless UA without "Headless" ("" when headed)
+	uaMeta        *emulation.UserAgentMetadata // matching client hints
 	mu            sync.RWMutex
 }
 
@@ -52,6 +56,7 @@ func (b *Bridge) injectStealth(ctx context.Context) {
 			_, err := page.AddScriptToEvaluateOnNewDocument(b.stealthScript).Do(ctx)
 			return err
 		}),
+		b.userAgentAction(),
 	); err != nil {
 		slog.Warn("stealth injection failed", "err", err)
 	}
@@ -69,7 +74,11 @@ func (b *Bridge) TabContext(tabID string) (context.Context, string, error) {
 		if len(targets) == 0 {
 			return nil, "", fmt.Errorf("no tabs open")
 		}
-		tabID = string(targets[0].TargetID)
+		tabID = b.defaultTab(targets)
+	} else {
+		b.mu.Lock()
+		b.active = tabID
+		b.mu.Unlock()
 	}
 
 	// Fast path: read lock
@@ -209,6 +218,7 @@ func (b *Bridge) CreateTab(url string) (string, context.Context, context.CancelF
 	newTargetID := string(chromedp.FromContext(ctx).Target.TargetID)
 	b.mu.Lock()
 	b.tabs[newTargetID] = &TabEntry{ctx: ctx, cancel: cancel}
+	b.active = newTargetID
 	b.mu.Unlock()
 
 	return newTargetID, ctx, cancel, nil
@@ -244,9 +254,31 @@ func (b *Bridge) CloseTab(tabID string) error {
 	delete(b.tabs, tabID)
 	delete(b.snapshots, tabID)
 	delete(b.monitors, tabID)
+	if b.active == tabID {
+		b.active = ""
+	}
 	b.mu.Unlock()
 
 	return nil
+}
+
+// defaultTab picks the tab for calls without tabId: the last tab used or
+// created, else the first real page (not about:blank), else the first tab.
+func (b *Bridge) defaultTab(targets []*target.Info) string {
+	b.mu.RLock()
+	active := b.active
+	b.mu.RUnlock()
+	for _, t := range targets {
+		if string(t.TargetID) == active {
+			return active
+		}
+	}
+	for _, t := range targets {
+		if t.URL != "about:blank" && t.URL != "" {
+			return string(t.TargetID)
+		}
+	}
+	return string(targets[0].TargetID)
 }
 
 // ListTargets returns all open page targets from Chrome.

@@ -48,8 +48,8 @@ const (
 //go:embed stealth.js
 var stealthScript string
 
-//go:embed readability.js
-var readabilityJS string
+//go:embed text.js
+var textJS string
 
 //go:embed welcome.html
 var welcomeHTML string

@@ -71,7 +71,7 @@ func (b *Bridge) initActionRegistry() {
 				if _, err := callOnTarget(ctx, 0, req.Selector, focusJS); err != nil {
 					return nil, err
 				}
-				return map[string]any{"typed": req.Text}, chromedp.Run(ctx, chromedp.KeyEvent(req.Text))
+				return map[string]any{"typed": req.Text}, typeText(ctx, req.Text)
 			}
 			if req.NodeID > 0 {
 				return map[string]any{"typed": req.Text}, typeByNodeID(ctx, req.NodeID, req.Text)

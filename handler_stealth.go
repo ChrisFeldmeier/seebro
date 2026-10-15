@@ -4,179 +4,126 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
+	"sort"
 	"time"
 
-	"log/slog"
-
 	"github.com/chromedp/cdproto/emulation"
-	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
 
 // ── GET /stealth/status ────────────────────────────────────
 
+// launchStealthFlags are the Chrome switches set in main.go that matter for detection.
+var launchStealthFlags = []string{
+	"--disable-blink-features=AutomationControlled",
+	"--exclude-switches=enable-automation",
+	"--disable-infobars",
+}
+
+// handleStealthStatus runs the checks bot detectors use inside a live tab and
+// scores the result. Without a browser it reports the static configuration.
 func (b *Bridge) handleStealthStatus(w http.ResponseWriter, r *http.Request) {
-	// Actually check features by evaluating in browser
-	ctx, _, err := b.TabContext("")
-	if err != nil {
-		// If no tab, return static analysis
-		b.sendStealthResponse(w, staticStealthFeatures(), "")
-		return
-	}
+	features := map[string]bool{}
+	userAgent, renderer := "", ""
+	measured := false
 
-	// Check actual browser state
-	var result struct {
-		WebDriver           bool     `json:"webdriver"`
-		Plugins             int      `json:"plugins"`
-		UserAgent           string   `json:"userAgent"`
-		HardwareConcurrency int      `json:"hardwareConcurrency"`
-		DeviceMemory        float64  `json:"deviceMemory"`
-		Languages           []string `json:"languages"`
-	}
-
-	tCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	checkScript := `({
-		webdriver: navigator.webdriver || false,
-		plugins: navigator.plugins.length,
-		userAgent: navigator.userAgent,
-		hardwareConcurrency: navigator.hardwareConcurrency,
-		deviceMemory: navigator.deviceMemory || 0,
-		languages: navigator.languages || []
-	})`
-
-	if err := chromedp.Run(tCtx, chromedp.Evaluate(checkScript, &result)); err == nil {
-		features := map[string]bool{
-			"automation_controlled": !result.WebDriver,
-			"webdriver_hidden":      !result.WebDriver,
-			"chrome_headless_new":   headless,
-			"user_agent_override":   result.UserAgent != "",
-			"webgl_vendor_override": true,
-			"plugins_spoofed":       result.Plugins > 0,
-			"languages_spoofed":     len(result.Languages) > 0,
-			"webrtc_leak_prevented": true,
-			"timezone_spoofed":      true,
-			"canvas_noise":          true,
-			"audio_noise":           false,
-			"font_spoofing":         true,
-			"hardware_concurrency":  result.HardwareConcurrency > 0,
-			"device_memory":         result.DeviceMemory > 0,
+	if ctx, _, err := b.TabContext(r.URL.Query().Get("tabId")); err == nil {
+		tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		var res struct {
+			Checks        map[string]bool `json:"checks"`
+			UserAgent     string          `json:"userAgent"`
+			WebglRenderer string          `json:"webglRenderer"`
 		}
-		b.sendStealthResponse(w, features, result.UserAgent)
-		return
+		err := chromedp.Run(tCtx, chromedp.Evaluate(stealthChecksJS, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithAwaitPromise(true)
+		}))
+		if err == nil && len(res.Checks) > 0 {
+			features, userAgent, renderer, measured = res.Checks, res.UserAgent, res.WebglRenderer, true
+		}
 	}
-
-	// Fallback to static
-	b.sendStealthResponse(w, staticStealthFeatures(), "")
+	if !measured {
+		features = staticStealthFeatures(b.userAgent != "" || !headless)
+	}
+	b.sendStealthResponse(w, features, userAgent, renderer, measured)
 }
 
-func staticStealthFeatures() map[string]bool {
+// staticStealthFeatures describes what the configuration provides when no
+// tab is available to measure.
+func staticStealthFeatures(uaOverride bool) map[string]bool {
 	return map[string]bool{
-		"automation_controlled": true,
-		"webdriver_hidden":      true,
-		"chrome_headless_new":   headless,
-		"user_agent_override":   true,
-		"webgl_vendor_override": true,
-		"plugins_spoofed":       true,
-		"languages_spoofed":     true,
-		"webrtc_leak_prevented": true,
-		"timezone_spoofed":      true,
-		"canvas_noise":          true,
-		"audio_noise":           false,
-		"font_spoofing":         true,
-		"hardware_concurrency":  true,
-		"device_memory":         true,
+		"webdriver_false":     true, // launch flag
+		"ua_not_headless":     uaOverride,
+		"client_hints_clean":  uaOverride,
+		"functions_native":    true,
+		"no_global_leaks":     true,
+		"device_memory_valid": true,
 	}
 }
 
-func (b *Bridge) sendStealthResponse(w http.ResponseWriter, features map[string]bool, userAgent string) {
-	chromeFlags := []string{
-		// Note: --disable-blink-features=AutomationControlled removed (deprecated Chrome 144+)
-		"--disable-features=IsolateOrigins,site-per-process",
-		"--disable-site-isolation-trials",
-		"--disable-web-security",
-		"--disable-features=BlinkGenPropertyTrees",
-		"--disable-ipc-flooding-protection",
-		"--disable-renderer-backgrounding",
-		"--disable-backgrounding-occluded-windows",
-		"--disable-features=TranslateUI",
-		"--disable-features=Translate",
-	}
-
-	enabledCount := 0
-	for _, enabled := range features {
-		if enabled {
-			enabledCount++
+func (b *Bridge) sendStealthResponse(w http.ResponseWriter, features map[string]bool, userAgent, renderer string, measured bool) {
+	passed := 0
+	for _, ok := range features {
+		if ok {
+			passed++
 		}
 	}
-	stealthScore := (enabledCount * 100) / len(features)
+	score := 0
+	if len(features) > 0 {
+		score = passed * 100 / len(features)
+	}
 
 	var level string
 	switch {
-	case stealthScore >= 80:
+	case score >= 90:
 		level = "high"
-	case stealthScore >= 50:
+	case score >= 70:
 		level = "medium"
-	case stealthScore >= 30:
+	case score >= 40:
 		level = "basic"
 	default:
 		level = "minimal"
 	}
 
-	// Use provided userAgent or get from browser if empty
-	if userAgent == "" && len(b.tabs) > 0 {
-		for _, tab := range b.tabs {
-			ctx, cancel := context.WithTimeout(tab.ctx, 1*time.Second)
-			_ = chromedp.Run(ctx, chromedp.Evaluate(`navigator.userAgent`, &userAgent))
-			cancel()
-			if userAgent != "" {
-				break
-			}
-		}
-	}
-
 	jsonResp(w, 200, map[string]any{
 		"level":           level,
-		"score":           stealthScore,
+		"score":           score,
+		"measured":        measured,
 		"features":        features,
-		"chrome_flags":    chromeFlags,
+		"chrome_flags":    launchStealthFlags,
 		"headless_mode":   headless,
+		"stealth_level":   stealthLevel,
 		"user_agent":      userAgent,
+		"webgl_renderer":  renderer,
 		"profile_path":    profileDir,
 		"recommendations": getStealthRecommendations(features),
 	})
 }
 
 func getStealthRecommendations(features map[string]bool) []string {
-	recommendations := []string{}
-
-	if !features["user_agent_override"] {
-		recommendations = append(recommendations, "Enable user agent rotation to avoid detection")
+	recs := []string{}
+	keys := make([]string, 0, len(features))
+	for k := range features {
+		keys = append(keys, k)
 	}
-	if !features["languages_spoofed"] {
-		recommendations = append(recommendations, "Randomize Accept-Language headers")
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !features[k] {
+			if advice, ok := stealthCheckAdvice[k]; ok {
+				recs = append(recs, advice)
+			} else {
+				recs = append(recs, k+" failed")
+			}
+		}
 	}
-	if !features["webrtc_leak_prevented"] {
-		recommendations = append(recommendations, "Block WebRTC to prevent IP leaks")
+	if len(recs) == 0 {
+		recs = append(recs, "All checks passed")
 	}
-	if !features["timezone_spoofed"] {
-		recommendations = append(recommendations, "Spoof timezone to match target locale")
-	}
-	if !features["canvas_noise"] {
-		recommendations = append(recommendations, "Add canvas fingerprint noise")
-	}
-	if !features["font_spoofing"] {
-		recommendations = append(recommendations, "Randomize font metrics")
-	}
-
-	if len(recommendations) == 0 {
-		recommendations = append(recommendations, "Stealth mode is well configured")
-	}
-
-	return recommendations
+	return recs
 }
 
 // ── POST /fingerprint/rotate ───────────────────────────────
@@ -201,7 +148,7 @@ func (b *Bridge) handleFingerprintRotate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ctx, _, err := b.TabContext(req.TabID)
+	ctx, tabID, err := b.TabContext(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
 		return
@@ -230,28 +177,19 @@ func (b *Bridge) handleFingerprintRotate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// JS overrides for properties CDP doesn't cover (screen, hardware, vendor)
-	script := fmt.Sprintf(`
-(function() {
-  Object.defineProperty(screen, 'width', { get: () => %d, configurable: true });
-  Object.defineProperty(screen, 'height', { get: () => %d, configurable: true });
-  Object.defineProperty(screen, 'availWidth', { get: () => %d, configurable: true });
-  Object.defineProperty(screen, 'availHeight', { get: () => %d, configurable: true });
-  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => %d, configurable: true });
-  Object.defineProperty(navigator, 'deviceMemory', { get: () => %d, configurable: true });
-})();
-	`, fp.ScreenWidth, fp.ScreenHeight, fp.ScreenWidth-20, fp.ScreenHeight-80,
-		fp.CPUCores, fp.Memory)
-
+	// Hardware and screen via CDP as well: redefining navigator/screen
+	// properties in JS is visible to detectors (descriptors, toString).
+	vs := b.emulatedViewport(tabID)
+	metrics := emulation.SetDeviceMetricsOverride(0, 0, 0, false)
+	if vs != nil {
+		metrics = emulation.SetDeviceMetricsOverride(vs.Width, vs.Height, vs.DPR, vs.Mobile)
+	}
 	if err := chromedp.Run(tCtx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, err := page.AddScriptToEvaluateOnNewDocument(script).Do(ctx)
-			return err
-		}),
-		chromedp.Evaluate(script, nil),
+		emulation.SetHardwareConcurrencyOverride(int64(fp.CPUCores)),
+		metrics.WithScreenWidth(int64(fp.ScreenWidth)).WithScreenHeight(int64(fp.ScreenHeight)),
 	); err != nil {
-		// Non-fatal: CDP overrides already applied for the important bits
-		slog.Warn("JS fingerprint extras failed", "err", err)
+		// Non-fatal: the UA override above is the important part.
+		slog.Warn("fingerprint hardware/screen override failed", "err", err)
 	}
 
 	jsonResp(w, 200, map[string]any{
@@ -351,8 +289,8 @@ func generateFingerprint(req fingerprintRequest) fingerprint {
 		fp.TimezoneOffset = -300
 	}
 
-	fp.CPUCores = 4 + rand.Intn(4)*2
-	fp.Memory = 4 + rand.Intn(4)*2
+	fp.CPUCores = []int{4, 8, 8, 12, 16}[rand.Intn(5)]
+	fp.Memory = []int{8, 16, 32}[rand.Intn(3)] // deviceMemory is always a power of two
 
 	return fp
 }

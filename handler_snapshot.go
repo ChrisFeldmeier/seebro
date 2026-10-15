@@ -22,7 +22,7 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	doDiff := r.URL.Query().Get("diff") == "true"
 	format := r.URL.Query().Get("format")          // "text", "yaml", "compact"
 	output := r.URL.Query().Get("output")          // "file" to save to disk
-	outputPath := r.URL.Query().Get("path")        // custom file path for output=file
+	outPath := r.URL.Query().Get("path")           // custom file path for output=file
 	selector := r.URL.Query().Get("selector")      // CSS selector to scope snapshot
 	maxTokensStr := r.URL.Query().Get("maxTokens") // truncate output to ~N tokens
 	reqNoAnim := r.URL.Query().Get("noAnimations") == "true"
@@ -237,8 +237,13 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 
 		// Write to file — use custom path if provided, otherwise default
 		filePath := filepath.Join(snapshotDir, filename)
-		if outputPath != "" {
-			filePath = outputPath
+		if outPath != "" {
+			safe, err := outputPath(outPath, ".json", ".txt", ".yaml", ".yml", ".md")
+			if err != nil {
+				jsonErr(w, 400, err)
+				return
+			}
+			filePath = safe
 			// Ensure parent directory exists for custom paths
 			if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 				jsonErr(w, 500, fmt.Errorf("create output dir: %w", err))

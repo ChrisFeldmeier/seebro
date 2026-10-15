@@ -48,6 +48,8 @@ func main() {
 		os.Exit(0)
 	}
 
+	ensureToken()
+
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
 		slog.Error("cannot create state dir", "err", err)
 		os.Exit(1)
@@ -90,6 +92,8 @@ func main() {
 
 			// Advanced stealth: hide automation indicators
 			chromedp.Flag("exclude-switches", "enable-automation"),
+			// navigator.webdriver = false natively (still effective in Chrome 155).
+			chromedp.Flag("disable-blink-features", "AutomationControlled"),
 			chromedp.Flag("disable-infobars", true),
 			chromedp.Flag("disable-dev-shm-usage", true),
 			chromedp.Flag("disable-renderer-backgrounding", true),
@@ -146,7 +150,7 @@ func main() {
 
 	// Prepare stealth script
 	stealthSeed := rand.Intn(1000000000)
-	seededScript := fmt.Sprintf("var __seebro_seed = %d;\nvar __seebro_stealth_level = %q;\n", stealthSeed, stealthLevel) + stealthScript
+	seededScript := buildStealthScript(stealthSeed, stealthLevel)
 	bridge.stealthScript = seededScript
 
 	// startChrome connects to Chrome with a timeout. Returns browserCtx and cancel,
@@ -225,6 +229,10 @@ func main() {
 	}
 
 	bridge.browserCtx = browserCtx
+	if headless {
+		bridge.initUserAgent(browserCtx)
+		_ = chromedp.Run(browserCtx, bridge.userAgentAction())
+	}
 	bridge.tabs = make(map[string]*TabEntry)
 	bridge.snapshots = make(map[string]*refCache)
 	bridge.initActionRegistry()
@@ -298,7 +306,7 @@ func main() {
 		_, _ = w.Write([]byte(welcomeHTML))
 	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: loggingMiddleware(corsMiddleware(authMiddleware(mux)))}
+	srv := &http.Server{Addr: listenAddr(), Handler: loggingMiddleware(guardMiddleware(corsMiddleware(authMiddleware(mux))))}
 
 	// Shutdown orchestration — used by both signal handler and /shutdown endpoint.
 	shutdownOnce := &sync.Once{}
@@ -334,7 +342,7 @@ func main() {
 		doShutdown()
 	}()
 
-	slog.Info("🪼 Seebro ready", "port", port, "cdp", cdpURL, "stealth", stealthLevel)
+	slog.Info("🪼 Seebro ready", "addr", listenAddr(), "cdp", cdpURL, "stealth", stealthLevel)
 	if token != "" {
 		slog.Info("auth enabled")
 	} else {

@@ -133,9 +133,12 @@ func (b *Bridge) handleNetworkRequest(w http.ResponseWriter, r *http.Request) {
 		case err != nil:
 			resp["bodyError"] = err.Error()
 		case q.Get("saveTo") != "":
-			path := q.Get("saveTo")
-			if e := os.MkdirAll(filepath.Dir(path), 0755); e == nil {
-				err = os.WriteFile(path, body, 0644)
+			var path string
+			path, err = outputPath(q.Get("saveTo"))
+			if err == nil {
+				if err = os.MkdirAll(filepath.Dir(path), 0755); err == nil {
+					err = os.WriteFile(path, body, 0644)
+				}
 			}
 			if err != nil {
 				resp["bodyError"] = err.Error()
@@ -393,15 +396,17 @@ func (b *Bridge) handleEmulate(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
 		return
 	}
-	ctx, _, err := b.TabContext(req.TabID)
+	ctx, tabID, err := b.TabContext(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
 		return
 	}
 	var actions []chromedp.Action
 	applied := []string{}
+	viewportChanged, emulated := false, (*viewportState)(nil)
 
 	if v := strings.TrimSpace(req.Viewport); v != "" {
+		viewportChanged = true
 		if v == "reset" {
 			actions = append(actions, emulation.ClearDeviceMetricsOverride(), emulation.SetTouchEmulationEnabled(false))
 		} else {
@@ -435,6 +440,7 @@ func (b *Bridge) handleEmulate(w http.ResponseWriter, r *http.Request) {
 				jsonErr(w, 400, fmt.Errorf("invalid viewport %q", v))
 				return
 			}
+			emulated = &viewportState{Width: wd, Height: ht, DPR: dpr, Mobile: mobile}
 			actions = append(actions,
 				emulation.SetDeviceMetricsOverride(wd, ht, dpr, mobile),
 				emulation.SetTouchEmulationEnabled(touch).WithMaxTouchPoints(5))
@@ -442,7 +448,11 @@ func (b *Bridge) handleEmulate(w http.ResponseWriter, r *http.Request) {
 		applied = append(applied, "viewport")
 	}
 	if req.UserAgent != nil {
-		actions = append(actions, emulation.SetUserAgentOverride(*req.UserAgent))
+		if *req.UserAgent == "" {
+			actions = append(actions, b.userAgentAction()) // back to the stealth UA
+		} else {
+			actions = append(actions, emulation.SetUserAgentOverride(*req.UserAgent))
+		}
 		applied = append(applied, "userAgent")
 	}
 	if req.ColorScheme != "" || req.ReducedMotion != "" {
@@ -524,6 +534,9 @@ func (b *Bridge) handleEmulate(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 500, fmt.Errorf("emulate: %w", err))
 		return
 	}
+	if viewportChanged {
+		b.setEmulatedViewport(tabID, emulated)
+	}
 	jsonResp(w, 200, map[string]any{"applied": applied})
 }
 
@@ -556,7 +569,11 @@ func (b *Bridge) handlePDF(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(buf)
 		return
 	}
-	path := q.Get("path")
+	path, err := outputPath(q.Get("path"), ".pdf")
+	if err != nil {
+		jsonErr(w, 400, err)
+		return
+	}
 	if path == "" {
 		path = filepath.Join(stateDir, "pdfs", "page-"+time.Now().Format("20060102-150405")+".pdf")
 	}

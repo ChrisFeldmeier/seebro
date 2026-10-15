@@ -8,90 +8,33 @@ import (
 )
 
 func TestStealthJavaScript(t *testing.T) {
-	// Test that stealth.js is syntactically valid
 	content := stealthScript
-
-	// Check for key stealth features
-	features := []string{
-		"navigator, 'webdriver'", // Object.defineProperty
-		"sessionSeed",
-		"seededRandom",
-		"toDataURL",
-		"measureText",
-		"hardwareConcurrency",
-		"deviceMemory",
-		"__seebro_timezone",
-	}
-
-	for _, feature := range features {
+	for _, feature := range []string{
+		"sessionSeed", "seededRandom", "toDataURL", "measureText",
+		"hardwareConcurrency", "deviceMemory", "nativeNames", "replaceMethod",
+	} {
 		if !strings.Contains(content, feature) {
 			t.Errorf("stealth script missing feature: %s", feature)
 		}
 	}
-
-	// Check no duplicate sessionSeed definitions
-	count := strings.Count(content, "const sessionSeed")
-	if count != 1 {
+	// These overrides are themselves detectable and must stay out.
+	for _, bad := range []string{"navigator, 'webdriver'", "navigator, 'plugins'", "navigator, 'platform'", "chrome.runtime"} {
+		if strings.Contains(content, bad) {
+			t.Errorf("stealth script contains detectable override: %s", bad)
+		}
+	}
+	if count := strings.Count(content, "const sessionSeed"); count != 1 {
 		t.Errorf("expected 1 sessionSeed definition, found %d", count)
 	}
 }
 
-func TestGetStealthRecommendations(t *testing.T) {
-	allFeatures := map[string]bool{
-		"user_agent_override":   true,
-		"languages_spoofed":     true,
-		"webrtc_leak_prevented": true,
-		"timezone_spoofed":      true,
-		"canvas_noise":          true,
-		"font_spoofing":         true,
-		"audio_noise":           true,
+func TestBuildStealthScript_NoGlobals(t *testing.T) {
+	s := buildStealthScript(7, "full")
+	if !strings.HasPrefix(s, "(function () {") || !strings.HasSuffix(s, "})();") {
+		t.Error("stealth script must be wrapped in a closure")
 	}
-
-	tests := []struct {
-		name     string
-		features map[string]bool
-		wantRecs int
-	}{
-		{
-			name:     "all enabled",
-			features: allFeatures,
-			wantRecs: 1, // Get "Stealth mode is well configured"
-		},
-		{
-			name: "canvas disabled",
-			features: map[string]bool{
-				"user_agent_override":   true,
-				"languages_spoofed":     true,
-				"webrtc_leak_prevented": true,
-				"timezone_spoofed":      true,
-				"canvas_noise":          false,
-				"font_spoofing":         true,
-				"audio_noise":           true,
-			},
-			wantRecs: 1, // Just canvas
-		},
-		{
-			name: "multiple disabled",
-			features: map[string]bool{
-				"user_agent_override":   false,
-				"languages_spoofed":     false,
-				"webrtc_leak_prevented": false,
-				"timezone_spoofed":      true,
-				"canvas_noise":          true,
-				"font_spoofing":         true,
-				"audio_noise":           true,
-			},
-			wantRecs: 3, // UA + lang + WebRTC
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			recs := getStealthRecommendations(tt.features)
-			if len(recs) != tt.wantRecs {
-				t.Errorf("expected %d recommendations, got %d: %v", tt.wantRecs, len(recs), recs)
-			}
-		})
+	if !strings.Contains(s, "var __seebro_seed = 7;") || !strings.Contains(s, `var __seebro_stealth_level = "full";`) {
+		t.Error("settings not injected")
 	}
 }
 

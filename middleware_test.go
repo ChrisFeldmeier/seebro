@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -109,26 +111,106 @@ func TestCorsMiddleware(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 
-	// OPTIONS should return 204
-	req := httptest.NewRequest("OPTIONS", "/test", nil)
+	// Unknown origins get no CORS headers (browsers then refuse to share responses).
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Origin", "https://evil.example")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != 204 {
-		t.Errorf("OPTIONS expected 204, got %d", w.Code)
-	}
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("missing CORS origin header")
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("unexpected CORS header for foreign origin: %q", got)
 	}
 
-	// GET should pass through with CORS headers
-	req = httptest.NewRequest("GET", "/test", nil)
+	// Allowed origins are echoed back, never "*".
+	old := allowedOrigins
+	allowedOrigins = []string{"https://app.example"}
+	defer func() { allowedOrigins = old }()
+	req = httptest.NewRequest("OPTIONS", "/test", nil)
+	req.Header.Set("Origin", "https://app.example")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Errorf("GET expected 200, got %d", w.Code)
+	if w.Code != 204 || w.Header().Get("Access-Control-Allow-Origin") != "https://app.example" {
+		t.Errorf("preflight: %d %q", w.Code, w.Header().Get("Access-Control-Allow-Origin"))
 	}
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("missing CORS origin header on GET")
+}
+
+func TestGuardMiddleware(t *testing.T) {
+	called := 0
+	handler := guardMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called++
+		w.WriteHeader(200)
+	}))
+	cases := []struct {
+		name    string
+		host    string
+		headers map[string]string
+		want    int
+	}{
+		{"curl", "localhost:9867", nil, 200},
+		{"same-origin page", "localhost:9867", map[string]string{"Origin": "http://localhost:" + port, "Sec-Fetch-Site": "same-origin"}, 200},
+		{"typed URL", "127.0.0.1:9867", map[string]string{"Sec-Fetch-Site": "none"}, 200},
+		{"cross-origin fetch", "localhost:9867", map[string]string{"Origin": "https://evil.example"}, 403},
+		{"img tag", "localhost:9867", map[string]string{"Sec-Fetch-Site": "cross-site"}, 403},
+		{"same-site other port", "localhost:9867", map[string]string{"Sec-Fetch-Site": "same-site"}, 403},
+		{"DNS rebinding", "evil.example:9867", nil, 403},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest("POST", "/evaluate", nil)
+		req.Host = c.host
+		for k, v := range c.headers {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, w.Code, c.want)
+		}
+	}
+	if called != 3 {
+		t.Errorf("handler called %d times, want 3", called)
+	}
+}
+
+func TestOutputPath(t *testing.T) {
+	old := stateDir
+	stateDir = t.TempDir()
+	defer func() { stateDir = old }()
+	dir := t.TempDir()
+
+	if p, err := outputPath(dir+"/shot.png", ".png"); err != nil || p != dir+"/shot.png" {
+		t.Errorf("plain path: %q %v", p, err)
+	}
+	if _, err := outputPath(dir+"/shot.sh", ".png"); err == nil {
+		t.Error("wrong extension accepted")
+	}
+	if _, err := outputPath(dir + "/.ssh/authorized_keys"); err == nil {
+		t.Error("hidden directory accepted")
+	}
+	if _, err := outputPath(stateDir+"/screens/a.png", ".png"); err != nil {
+		t.Errorf("state dir must always be allowed: %v", err)
+	}
+	if p, _ := outputPath(""); p != "" {
+		t.Error("empty path should stay empty")
+	}
+}
+
+func TestEnsureToken(t *testing.T) {
+	oldTok, oldBind := token, bindAddr
+	defer func() { token, bindAddr = oldTok, oldBind }()
+	t.Setenv("BRIDGE_CONFIG", t.TempDir()+"/config.json")
+
+	token, bindAddr = "", "127.0.0.1"
+	ensureToken()
+	if token != "" {
+		t.Error("loopback must not force a token")
+	}
+	bindAddr = "0.0.0.0"
+	ensureToken()
+	if len(token) != 48 {
+		t.Fatalf("expected generated token, got %q", token)
+	}
+	data, _ := os.ReadFile(os.Getenv("BRIDGE_CONFIG"))
+	if !strings.Contains(string(data), token) {
+		t.Error("generated token not persisted")
 	}
 }
 

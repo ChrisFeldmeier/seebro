@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -97,56 +96,26 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		format = page.CaptureScreenshotFormatWebp
 	}
 
-	// Optional clip: a single element (ref/selector) or the full scrollable page.
-	var clip *page.Viewport
 	nodeID, err := b.resolveRef(resolvedTabID, r.URL.Query().Get("ref"))
 	if err != nil {
 		jsonErr(w, 400, err)
 		return
 	}
-	if sel := r.URL.Query().Get("selector"); nodeID > 0 || sel != "" {
-		raw, err := callOnTarget(tCtx, nodeID, sel, `function() {
-			this.scrollIntoView({block: "center", inline: "center"});
-			const r = this.getBoundingClientRect();
-			return {x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height};
-		}`)
-		if err != nil {
-			jsonErr(w, 400, fmt.Errorf("element: %w", err))
-			return
-		}
-		clip = &page.Viewport{Scale: 1}
-		if err := json.Unmarshal(raw, clip); err != nil || clip.Width == 0 || clip.Height == 0 {
-			jsonErr(w, 400, fmt.Errorf("element has no visible box"))
-			return
-		}
-		clip.Scale = 1
-	} else if r.URL.Query().Get("fullPage") == "true" {
-		var cssContent *dom.Rect
-		if err := chromedp.Run(tCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-			var err error
-			_, _, _, _, _, cssContent, err = page.GetLayoutMetrics().Do(ctx)
-			return err
-		})); err != nil {
-			jsonErr(w, 500, fmt.Errorf("layout metrics: %w", err))
-			return
-		}
-		clip = &page.Viewport{X: 0, Y: 0, Width: cssContent.Width, Height: min(cssContent.Height, 16384), Scale: 1}
+	opts := shotOptions{
+		format:   format,
+		quality:  quality,
+		fullPage: r.URL.Query().Get("fullPage") == "true",
+		nodeID:   nodeID,
+		selector: r.URL.Query().Get("selector"),
 	}
-
-	if err := chromedp.Run(tCtx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			var err error
-			p := page.CaptureScreenshot().WithFormat(format)
-			if format != page.CaptureScreenshotFormatPng {
-				p = p.WithQuality(int64(quality))
-			}
-			if clip != nil {
-				p = p.WithClip(clip).WithCaptureBeyondViewport(true)
-			}
-			buf, err = p.Do(ctx)
-			return err
-		}),
-	); err != nil {
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("maxHeight"), 64); err == nil {
+		opts.maxHeight = v
+	}
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("maxDim"), 64); err == nil {
+		opts.maxDim = v
+	}
+	buf, err = b.captureScreenshot(tCtx, resolvedTabID, opts)
+	if err != nil {
 		jsonErr(w, 500, fmt.Errorf("screenshot: %w", err))
 		return
 	}
@@ -165,8 +134,13 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		filename := fmt.Sprintf("screenshot-%s.%s", timestamp, ext)
 		filePath := filepath.Join(screenshotDir, filename)
 		if p := r.URL.Query().Get("path"); p != "" {
-			filePath = p
-			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			safe, err := outputPath(p, ".jpg", ".jpeg", ".png", ".webp")
+			if err != nil {
+				jsonErr(w, 400, err)
+				return
+			}
+			filePath = safe
+			if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
 				jsonErr(w, 500, err)
 				return
 			}
@@ -202,11 +176,24 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 
 // ── GET /text ──────────────────────────────────────────────
 
+// handleText returns the page text in one round trip. mode: readability
+// (default, main content without navigation/ads), raw (all visible text) or
+// markdown (headings, lists, links, tables). maxChars/offset page through
+// long pages so a single call can't flood an agent's context.
 func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
-	tabID := r.URL.Query().Get("tabId")
-	mode := r.URL.Query().Get("mode")
+	q := r.URL.Query()
+	mode := q.Get("mode")
+	if mode == "" {
+		mode = q.Get("format")
+	}
+	switch mode {
+	case "", "readability", "raw", "markdown":
+	default:
+		jsonErr(w, 400, fmt.Errorf("mode must be readability, raw or markdown"))
+		return
+	}
 
-	ctx, _, err := b.TabContext(tabID)
+	ctx, _, err := b.TabContext(q.Get("tabId"))
 	if err != nil {
 		jsonErr(w, 404, err)
 		return
@@ -216,34 +203,48 @@ func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
 	defer tCancel()
 	go cancelOnClientDone(r.Context(), tCancel)
 
-	var text string
-	if mode == "raw" {
-		if err := chromedp.Run(tCtx,
-			chromedp.Evaluate(`document.body.innerText`, &text),
-		); err != nil {
-			jsonErr(w, 500, fmt.Errorf("text extract: %w", err))
-			return
-		}
-	} else {
-		if err := chromedp.Run(tCtx,
-			chromedp.Evaluate(readabilityJS, &text),
-		); err != nil {
-			jsonErr(w, 500, fmt.Errorf("text extract: %w", err))
-			return
-		}
+	opts, _ := json.Marshal(map[string]string{"mode": mode})
+	var res struct {
+		Text  string `json:"text"`
+		URL   string `json:"url"`
+		Title string `json:"title"`
+	}
+	if err := chromedp.Run(tCtx, chromedp.Evaluate("("+textJS+")("+string(opts)+")", &res)); err != nil {
+		jsonErr(w, 500, fmt.Errorf("text extract: %w", err))
+		return
 	}
 
-	var url, title string
-	_ = chromedp.Run(tCtx,
-		chromedp.Location(&url),
-		chromedp.Title(&title),
-	)
+	out := map[string]any{"url": res.URL, "title": res.Title}
+	text, total := pageText(res.Text, queryInt(r, "offset", 0), queryInt(r, "maxChars", 0))
+	out["text"] = text
+	if total > len([]rune(text)) {
+		off := max(queryInt(r, "offset", 0), 0)
+		out["totalChars"] = total
+		out["offset"] = off
+		if next := off + len([]rune(text)); next < total {
+			out["nextOffset"] = next
+			out["truncated"] = true
+		}
+	}
+	jsonResp(w, 200, out)
+}
 
-	jsonResp(w, 200, map[string]any{
-		"url":   url,
-		"title": title,
-		"text":  text,
-	})
+// pageText returns the [offset, offset+maxChars) rune window of text and the
+// total length in runes. maxChars <= 0 means no limit.
+func pageText(text string, offset, maxChars int) (string, int) {
+	runes := []rune(text)
+	total := len(runes)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := total
+	if maxChars > 0 && offset+maxChars < total {
+		end = offset + maxChars
+	}
+	return string(runes[offset:end]), total
 }
 
 // ── POST /navigate ─────────────────────────────────────────
@@ -253,6 +254,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 		TabID       string  `json:"tabId"`
 		URL         string  `json:"url"`
 		Type        string  `json:"type"`        // url (default), back, forward, reload
+		WaitUntil   string  `json:"waitUntil"`   // domcontentloaded (default), load, networkidle
 		IgnoreCache bool    `json:"ignoreCache"` // reload only
 		NewTab      bool    `json:"newTab"`
 		WaitTitle   float64 `json:"waitTitle"`   // seconds to wait for title (default 2, max 30)
@@ -320,6 +322,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 			_ = setResourceBlocking(tCtx, blockPatterns)
 		}
 
+		b.waitLoad(tCtx, newTargetID, req.WaitUntil)
 		var url, title string
 		_ = chromedp.Run(tCtx, chromedp.Location(&url))
 		title = waitForTitle(tCtx, titleWait)
@@ -352,6 +355,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.DeleteRefCache(resolvedTabID)
+	b.waitLoad(tCtx, resolvedTabID, req.WaitUntil)
 
 	var url string
 	_ = chromedp.Run(tCtx, chromedp.Location(&url))
@@ -596,4 +600,27 @@ func (b *Bridge) handleHistoryNav(w http.ResponseWriter, r *http.Request, tabID,
 	var url string
 	_ = chromedp.Run(tCtx, chromedp.Location(&url))
 	jsonResp(w, 200, map[string]any{"url": url, "title": waitForTitle(tCtx, 0)})
+}
+
+// waitLoad waits beyond "document interactive" when asked: "load" waits for
+// readyState complete, "networkidle" additionally for ≤2 requests in flight
+// for 500ms. Timeouts are not errors; the page is usually usable anyway.
+func (b *Bridge) waitLoad(ctx context.Context, tabID, until string) {
+	if until != "load" && until != "networkidle" {
+		return
+	}
+	for ctx.Err() == nil {
+		var state string
+		if err := chromedp.Run(ctx, chromedp.Evaluate("document.readyState", &state)); err == nil && state == "complete" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if until != "networkidle" {
+		return
+	}
+	m := b.Monitor(tabID)
+	for m != nil && ctx.Err() == nil && !m.NetworkIdle(2, 500*time.Millisecond) {
+		time.Sleep(100 * time.Millisecond)
+	}
 }

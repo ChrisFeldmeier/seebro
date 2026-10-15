@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 )
 
 // navigatePage uses raw CDP Page.navigate + polls document.readyState for completion.
@@ -67,8 +69,7 @@ func waitReady(ctx context.Context) {
 						}
 					}
 				}
-				// Check every 200ms to avoid excessive polling
-				time.Sleep(200 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 			}
 			// Timeout reached, but don't fail - page might still be usable
 			return nil
@@ -77,10 +78,14 @@ func waitReady(ctx context.Context) {
 }
 
 // waitForTitle polls document.title for up to the given duration, returning
-// the first non-empty value or "" on timeout. Pass 0 for the default (2s).
+// the first non-empty value or "" on timeout. With wait <= 0 it reads the
+// title once: <title> is parsed before the document becomes interactive, so
+// waiting only helps SPAs that set it later (and costs 2s on pages without one).
 func waitForTitle(ctx context.Context, wait time.Duration) string {
 	if wait <= 0 {
-		wait = 2 * time.Second
+		var title string
+		_ = chromedp.Run(ctx, chromedp.Title(&title))
+		return title
 	}
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
@@ -158,12 +163,40 @@ func clickByNodeID(ctx context.Context, backendNodeID int64) error {
 	return withElement(ctx, backendNodeID, clickJS)
 }
 
+// typeText enters text into the focused element. Plain text goes in with one
+// Input.insertText (fires beforeinput/input) and only the last character is a
+// real key press, so keydown/keyup listeners (autocomplete) still fire once.
+// Per-character key events cost ~1.6ms each; insertText is constant time.
+// Text containing control keys (Enter, Tab, Backspace…) falls back to key events.
+func typeText(ctx context.Context, text string) error {
+	runes := []rune(text)
+	if len(runes) <= 1 || hasControlKeys(text) {
+		return chromedp.Run(ctx, chromedp.KeyEvent(text))
+	}
+	return chromedp.Run(ctx,
+		input.InsertText(string(runes[:len(runes)-1])),
+		chromedp.KeyEvent(string(runes[len(runes)-1])),
+	)
+}
+
+func hasControlKeys(text string) bool {
+	for _, r := range text {
+		if r == '\r' || r == '\t' || r == '\b' || r == '\u007f' {
+			return true
+		}
+		if k, ok := kb.Keys[r]; ok && !k.Print {
+			return true
+		}
+	}
+	return false
+}
+
 // typeByNodeID scrolls an element into view, focuses it, and sends keyboard events.
 func typeByNodeID(ctx context.Context, backendNodeID int64, text string) error {
 	if err := withElement(ctx, backendNodeID, "function() { this.scrollIntoViewIfNeeded(); }"); err != nil {
 		return err
 	}
-	return chromedp.Run(ctx,
+	if err := chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			p := map[string]any{"backendNodeId": backendNodeID}
 			if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.focus", p, nil); err != nil {
@@ -171,8 +204,10 @@ func typeByNodeID(ctx context.Context, backendNodeID int64, text string) error {
 			}
 			return nil
 		}),
-		chromedp.KeyEvent(text),
-	)
+	); err != nil {
+		return err
+	}
+	return typeText(ctx, text)
 }
 
 // hoverByNodeID scrolls an element into view and dispatches a mouseover event.

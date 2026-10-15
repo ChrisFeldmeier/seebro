@@ -89,7 +89,8 @@ type tabMonitor struct {
 	consoleSeq int64
 	consoleMax int
 
-	dialog *dialogInfo
+	dialog   *dialogInfo
+	viewport *viewportState // device metrics set via /emulate
 
 	inflight     int
 	lastActivity time.Time

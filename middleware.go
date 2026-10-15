@@ -47,11 +47,16 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// corsMiddleware answers CORS only for explicitly allowed origins
+// (BRIDGE_ALLOWED_ORIGINS); everyone else gets no CORS headers.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		if origin := r.Header.Get("Origin"); origin != "" && originAllowed(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Seebro-Owner, Mcp-Session-Id, Mcp-Protocol-Version")
+		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
 			return

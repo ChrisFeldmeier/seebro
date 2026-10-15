@@ -149,6 +149,7 @@ func (b *Bridge) RestoreState() {
 			slog.Warn("restore tab failed", "url", tab.URL, "err", err)
 			continue
 		}
+		b.injectStealth(ctx) // restored tabs previously ran without stealth
 
 		newID := string(chromedp.FromContext(ctx).Target.TargetID)
 		b.mu.Lock()

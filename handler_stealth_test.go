@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 )
@@ -86,99 +87,71 @@ func TestGenerateFingerprint_WithBrowser(t *testing.T) {
 
 // ── getStealthRecommendations ──────────────────────────────
 
-func TestGetStealthRecommendations_AllEnabled(t *testing.T) {
-	features := map[string]bool{
-		"user_agent_override":   true,
-		"languages_spoofed":     true,
-		"webrtc_leak_prevented": true,
-		"timezone_spoofed":      true,
-		"canvas_noise":          true,
-		"font_spoofing":         true,
-	}
-	recs := getStealthRecommendations(features)
-	if len(recs) != 1 || recs[0] != "Stealth mode is well configured" {
-		t.Errorf("expected well-configured message, got %v", recs)
+func TestGetStealthRecommendations_AllPassed(t *testing.T) {
+	recs := getStealthRecommendations(map[string]bool{"webdriver_false": true, "ua_not_headless": true})
+	if len(recs) != 1 || recs[0] != "All checks passed" {
+		t.Errorf("expected all-passed message, got %v", recs)
 	}
 }
 
-func TestGetStealthRecommendations_NoneEnabled(t *testing.T) {
-	features := map[string]bool{}
-	recs := getStealthRecommendations(features)
-	if len(recs) != 6 {
-		t.Errorf("expected 6 recommendations, got %d: %v", len(recs), recs)
+func TestGetStealthRecommendations_FailedChecks(t *testing.T) {
+	recs := getStealthRecommendations(map[string]bool{
+		"webdriver_false": false,
+		"ua_not_headless": true,
+		"custom_check":    false,
+	})
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 recommendations, got %v", recs)
 	}
-}
-
-func TestGetStealthRecommendations_Partial(t *testing.T) {
-	features := map[string]bool{
-		"user_agent_override": true,
-		"timezone_spoofed":    true,
-	}
-	recs := getStealthRecommendations(features)
-	// Should have 4 recommendations (the 4 missing features)
-	if len(recs) != 4 {
-		t.Errorf("expected 4 recommendations, got %d: %v", len(recs), recs)
+	if recs[0] != "custom_check failed" || recs[1] != stealthCheckAdvice["webdriver_false"] {
+		t.Errorf("unexpected advice (sorted by check name): %v", recs)
 	}
 }
 
 // ── sendStealthResponse ────────────────────────────────────
 
-func TestSendStealthResponse_HighScore(t *testing.T) {
-	b := &Bridge{}
-	b.tabs = make(map[string]*TabEntry)
-	features := map[string]bool{
-		"a": true, "b": true, "c": true, "d": true, "e": true,
+func stealthLevelFor(t *testing.T, passed, total int) string {
+	t.Helper()
+	features := map[string]bool{}
+	for i := 0; i < total; i++ {
+		features[string(rune('a'+i))] = i < passed
 	}
 	w := httptest.NewRecorder()
-	b.sendStealthResponse(w, features, "TestAgent/1.0")
-
-	if w.Code != 200 {
-		t.Errorf("expected 200, got %d", w.Code)
+	(&Bridge{}).sendStealthResponse(w, features, "", "", true)
+	var out struct {
+		Level string `json:"level"`
+		Score int    `json:"score"`
 	}
-	body := w.Body.String()
-	if !searchString(body, `"level":"high"`) {
-		t.Errorf("expected high level for 100%% score, got: %s", body)
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
 	}
+	if out.Score != passed*100/total {
+		t.Errorf("score %d for %d/%d", out.Score, passed, total)
+	}
+	return out.Level
 }
 
-func TestSendStealthResponse_LowScore(t *testing.T) {
-	b := &Bridge{}
-	b.tabs = make(map[string]*TabEntry)
-	features := map[string]bool{
-		"a": true, "b": false, "c": false, "d": false, "e": false,
-		"f": false, "g": false, "h": false, "i": false, "j": false,
+func TestSendStealthResponse_Levels(t *testing.T) {
+	cases := []struct {
+		passed, total int
+		level         string
+	}{
+		{10, 10, "high"}, {8, 10, "medium"}, {5, 10, "basic"}, {1, 10, "minimal"},
 	}
-	w := httptest.NewRecorder()
-	b.sendStealthResponse(w, features, "")
-
-	body := w.Body.String()
-	if !searchString(body, `"level":"minimal"`) {
-		t.Errorf("expected minimal level for 10%% score, got: %s", body)
-	}
-}
-
-func TestSendStealthResponse_MediumScore(t *testing.T) {
-	b := &Bridge{}
-	b.tabs = make(map[string]*TabEntry)
-	// 6/10 = 60%
-	features := map[string]bool{
-		"a": true, "b": true, "c": true, "d": true, "e": true,
-		"f": true, "g": false, "h": false, "i": false, "j": false,
-	}
-	w := httptest.NewRecorder()
-	b.sendStealthResponse(w, features, "")
-
-	body := w.Body.String()
-	if !searchString(body, `"level":"medium"`) {
-		t.Errorf("expected medium level, got: %s", body)
+	for _, c := range cases {
+		if got := stealthLevelFor(t, c.passed, c.total); got != c.level {
+			t.Errorf("%d/%d: level %s, want %s", c.passed, c.total, got, c.level)
+		}
 	}
 }
 
 // ── staticStealthFeatures ──────────────────────────────────
 
-func TestStaticStealthFeatures_HasEntries(t *testing.T) {
-	features := staticStealthFeatures()
-	if len(features) == 0 {
-		t.Error("expected non-empty stealth features map")
+func TestStaticStealthFeatures(t *testing.T) {
+	if f := staticStealthFeatures(true); len(f) == 0 || !f["ua_not_headless"] {
+		t.Errorf("with UA override: %v", f)
+	}
+	if f := staticStealthFeatures(false); f["ua_not_headless"] {
+		t.Errorf("without UA override the UA still says Headless: %v", f)
 	}
 }

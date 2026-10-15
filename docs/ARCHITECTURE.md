@@ -45,7 +45,7 @@ seebro/
 ├── state.go             # Session persistence: save/restore tabs to disk
 ├── middleware.go         # HTTP middleware: logging, auth token, CORS
 ├── stealth.js           # Stealth script: light/full modes, injected via CDP
-├── readability.js       # Readability extraction for /text endpoint
+├── text.js              # Text extraction for /text (readability, raw, markdown)
 ├── welcome.html         # Headed mode welcome page (🪼 branding)
 ├── Dockerfile           # Alpine + Chromium container image
 └── scripts/
@@ -230,8 +230,8 @@ Priority order (highest wins):
 //go:embed stealth.js
 var stealthScript string
 
-//go:embed readability.js
-var readabilityJS string
+//go:embed text.js
+var textJS string
 ```
 
 Both JS files are compiled into the binary via Go embed.

@@ -36,6 +36,7 @@ USER seebro
 # Environment variables
 ENV BRIDGE_PORT=9867 \
     BRIDGE_HEADLESS=true \
+    BRIDGE_BIND=0.0.0.0 \
     BRIDGE_STATE_DIR=/data \
     BRIDGE_PROFILE=/data/chrome-profile \
     CHROME_BINARY=/usr/bin/chromium-browser \
