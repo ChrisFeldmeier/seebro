@@ -25,7 +25,16 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, code: 200}
 		next.ServeHTTP(sw, r)
-		slog.Info("request",
+		// Successful requests only at debug level: an agent makes thousands
+		// of calls and the log would otherwise grow without bound.
+		level := slog.LevelDebug
+		switch {
+		case sw.code >= 500:
+			level = slog.LevelWarn
+		case sw.code >= 400:
+			level = slog.LevelInfo
+		}
+		slog.Log(r.Context(), level, "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", sw.code,

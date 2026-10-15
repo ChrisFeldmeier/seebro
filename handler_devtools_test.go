@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -58,15 +59,54 @@ func TestHandleNavigate_HistoryNoTab(t *testing.T) {
 
 func TestResolveRef(t *testing.T) {
 	b := newTestBridge()
-	b.snapshots["T"] = &refCache{refs: map[string]int64{"e1": 99}}
-	if id, err := b.resolveRef("T", "e1"); err != nil || id != 99 {
-		t.Errorf("got %d %v", id, err)
+	ctx := context.Background()
+	b.snapshots["T"] = &refCache{refs: map[string]int64{"a1": 99}}
+	if id, _, err := b.resolveRef(ctx, "T", "a1"); err != nil || id != 99 {
+		t.Errorf("accessibility ref: got %d %v", id, err)
 	}
-	if id, err := b.resolveRef("T", ""); err != nil || id != 0 {
+	if id, _, err := b.resolveRef(ctx, "T", ""); err != nil || id != 0 {
 		t.Errorf("empty ref: %d %v", id, err)
 	}
-	if _, err := b.resolveRef("T", "e2"); err == nil {
+	if _, _, err := b.resolveRef(ctx, "T", "a2"); err == nil {
 		t.Error("missing ref should error")
+	}
+	// Engine refs need a snapshot of that frame first.
+	if _, _, err := b.resolveRef(ctx, "T", "f3e7"); err == nil || !strings.Contains(err.Error(), "snapshot") {
+		t.Errorf("unknown frame ref: %v", err)
+	}
+	if _, _, err := b.resolveRef(ctx, "T", "e7"); err == nil || !strings.Contains(err.Error(), "snapshot") {
+		t.Errorf("engine ref without world: %v", err)
+	}
+}
+
+func TestRefNameAndPattern(t *testing.T) {
+	cases := map[string][2]int64{"e5": {0, 5}, "f2e17": {2, 17}}
+	for ref, want := range cases {
+		m := jsRefPattern.FindStringSubmatch(ref)
+		if m == nil {
+			t.Fatalf("%s did not match", ref)
+		}
+		if got := refName(int(want[0]), want[1]); got != ref {
+			t.Errorf("refName(%d,%d) = %s, want %s", want[0], want[1], got, ref)
+		}
+	}
+	for _, bad := range []string{"a5", "e", "f1", "ex5", "e5x"} {
+		if jsRefPattern.MatchString(bad) {
+			t.Errorf("%s should not be an engine ref", bad)
+		}
+	}
+}
+
+func TestPageText(t *testing.T) {
+	text, total := pageText("hello wörld", 6, 3)
+	if text != "wör" || total != 11 {
+		t.Errorf("got %q %d", text, total)
+	}
+	if text, _ := pageText("abc", 10, 5); text != "" {
+		t.Errorf("offset past end: %q", text)
+	}
+	if text, _ := pageText("abc", -1, 0); text != "abc" {
+		t.Errorf("no limit: %q", text)
 	}
 }
 

@@ -90,14 +90,14 @@ func TestBuildSnapshot(t *testing.T) {
 	}
 
 	// Check refs map
-	if refs["e0"] != 1 {
-		t.Errorf("e0 should map to nodeID 1, got %d", refs["e0"])
+	if refs["a0"] != 1 {
+		t.Errorf("a0 should map to nodeID 1, got %d", refs["a0"])
 	}
-	if refs["e1"] != 10 {
-		t.Errorf("e1 should map to nodeID 10, got %d", refs["e1"])
+	if refs["a1"] != 10 {
+		t.Errorf("a1 should map to nodeID 10, got %d", refs["a1"])
 	}
-	if refs["e2"] != 20 {
-		t.Errorf("e2 should map to nodeID 20, got %d", refs["e2"])
+	if refs["a2"] != 20 {
+		t.Errorf("a2 should map to nodeID 20, got %d", refs["a2"])
 	}
 
 	// Check depth

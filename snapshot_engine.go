@@ -60,13 +60,13 @@ type jsSnapshot struct {
 
 // frameRefs is the per-tab bookkeeping for isolated worlds and frame indexes.
 type frameRefs struct {
-	mu       sync.Mutex
-	worlds   map[string]runtime.ExecutionContextID // frameID → isolated world
-	index    map[string]int                        // frameID → n in "f<n>"
-	frames   map[int]string                        // n → frameID
-	nextIdx  int
-	nextID   int64
-	worldTag int
+	mu      sync.Mutex
+	worlds  map[string]runtime.ExecutionContextID // frameID → isolated world
+	index   map[string]int                        // frameID → n in "f<n>"
+	frames  map[int]string                        // n → frameID
+	nextIdx int
+	nextID  int64
+	snapped bool // a snapshot was taken at least once
 }
 
 func (b *Bridge) frameRefsFor(tabID string) *frameRefs {
@@ -282,6 +282,7 @@ func (b *Bridge) jsSnapshot(ctx context.Context, tabID string, o jsSnapshotOptio
 		if snap.Next > fr.nextID {
 			fr.nextID = snap.Next
 		}
+		fr.snapped = true
 		fr.mu.Unlock()
 
 		if i == 0 {
@@ -324,8 +325,9 @@ func (b *Bridge) resolveRef(ctx context.Context, tabID, ref string) (int64, stri
 		fr := b.frameRefsFor(tabID)
 		fr.mu.Lock()
 		frameID, ok := fr.frames[frameIdx]
+		snapped := fr.snapped
 		fr.mu.Unlock()
-		if !ok {
+		if !ok || !snapped {
 			return 0, "", fmt.Errorf("ref %s not found - take a /snapshot first", ref)
 		}
 		wid, err := b.world(ctx, fr, frameID, false)

@@ -30,6 +30,14 @@ var bridge Bridge
 func main() {
 	// Load configuration from file or environment
 	loadConfig()
+	switch strings.ToLower(os.Getenv("BRIDGE_LOG_LEVEL")) {
+	case "debug":
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	case "warn":
+		slog.SetLogLoggerLevel(slog.LevelWarn)
+	case "error":
+		slog.SetLogLoggerLevel(slog.LevelError)
+	}
 
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("seebro %s\n", version)

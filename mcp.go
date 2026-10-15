@@ -26,10 +26,10 @@ const mcpMaxText = 200_000 // bytes of text per tool result
 var mcpProtocolVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 const mcpInstructions = `Seebro is a real Chrome browser (with a persistent, possibly logged-in profile).
-Workflow: tab_new → keep its tabId and pass it to every call → get_text to read, snapshot to get element refs (e0, e1 …) → click/fill/type_text/press_key with ref → wait_for after actions that load content.
-Refs are invalid after navigation or big DOM changes: take a new snapshot. Prefer get_text/snapshot over screenshots (10x fewer tokens).
-To pull data out of web apps: network_requests (filter type=XHR,Fetch) then network_request for the JSON body, or evaluate with fetch() inside the page (uses the page's cookies).
-Close tabs you opened with tab_close. Never submit purchases, payments or messages without the user's explicit OK.`
+Workflow: tab_new → pass its tabId to every call → get_text to read (mode=markdown keeps links/tables) → snapshot for element refs (e12, f1e3 inside iframes) → click/fill/type_text/press_key with ref → wait_for after actions that load content.
+Refs stay valid while the element exists; after navigation take a new snapshot. snapshot viewport=true lists only what is on screen (far fewer tokens). Prefer get_text/snapshot over screenshots.
+To pull data out of web apps: network_requests (type XHR,Fetch) then network_request for the JSON body; or evaluate with fetch() inside the page (uses its cookies); websocket_messages for live data.
+If a call says the tab is unresponsive, use tab_reset. Close tabs you opened. Never submit purchases, payments or messages without the user's explicit OK.`
 
 type mcpTool struct {
 	Name        string         `json:"name"`
@@ -91,7 +91,12 @@ type rpcResponse struct {
 }
 
 // handleHTTP serves POST /mcp. Notifications get 202 with no body.
+type ownerKey struct{}
+
 func (s *mcpServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	if owner := r.Header.Get("X-Seebro-Owner"); owner != "" {
+		r = r.WithContext(context.WithValue(r.Context(), ownerKey{}, owner))
+	}
 	var raw json.RawMessage
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4*maxBodySize)).Decode(&raw); err != nil {
 		jsonResp(w, 400, rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{-32700, "parse error"}})
@@ -232,6 +237,9 @@ func (s *mcpServer) call(ctx context.Context, method, path string, query url.Val
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if owner, ok := ctx.Value(ownerKey{}).(string); ok {
+		req.Header.Set("X-Seebro-Owner", owner) // tab locks know which agent this is
+	}
 	rec := httptest.NewRecorder()
 	s.api.ServeHTTP(rec, req)
 	return toResult(rec.Code, rec.Header().Get("Content-Type"), rec.Body.Bytes())
@@ -349,14 +357,14 @@ func pArr(items map[string]any, desc string) map[string]any {
 
 // withTab adds the common tabId parameter.
 func withTab(props map[string]any) map[string]any {
-	props["tabId"] = pStr("Tab ID from tab_new / tabs_list. Always pass it; without it an arbitrary tab is used.")
+	props["tabId"] = pStr("Tab ID from tab_new (default: last used tab)")
 	return props
 }
 
 // withTarget adds ref/selector element addressing.
 func withTarget(props map[string]any) map[string]any {
-	props["ref"] = pStr("Element ref from the latest snapshot, e.g. \"e12\"")
-	props["selector"] = pStr("CSS selector (alternative to ref)")
+	props["ref"] = pStr("Element ref from snapshot, e.g. e12")
+	props["selector"] = pStr("CSS selector instead of ref")
 	return withTab(props)
 }
 
@@ -373,51 +381,66 @@ func mcpTools() []mcpTool {
 		// Tabs
 		{Name: "tabs_list", Description: "List open browser tabs with id, url, title, lock owner and any open JS dialog.",
 			InputSchema: obj(map[string]any{}), Annotations: readOnly, run: getTool("/tabs", nil)},
-		{Name: "tab_new", Description: "Open a new tab (optionally at a URL). Returns its tabId — use it for all following calls.",
-			InputSchema: obj(map[string]any{"url": pStr("URL to open (default about:blank)")}), Annotations: sideEffects,
+		{Name: "tab_new", Description: "Open a new tab (optionally at a URL). Returns its tabId — use it for all following calls. context=\"name\" opens it in an isolated, incognito-like session (own cookies/storage, shared by tabs with the same name).",
+			InputSchema: obj(map[string]any{"url": pStr("URL to open (default about:blank)"), "context": pStr("Isolated context name (optional)")}), Annotations: sideEffects,
 			run: postTool("/tab", map[string]any{"action": "new"})},
+		{Name: "tab_reset", Description: "Replace a hung or crashed tab with a fresh one at the same URL. Returns the new tabId.",
+			InputSchema: obj(withTab(map[string]any{}), "tabId"), Annotations: destructive,
+			run: postTool("/tab", map[string]any{"action": "reset"})},
+		{Name: "contexts", Description: "List isolated contexts, or close one with close=\"name\" (closes its tabs, discards its cookies).",
+			InputSchema: obj(map[string]any{"close": pStr("Context name to close")}), Annotations: sideEffects, run: contextsTool},
 		{Name: "tab_close", Description: "Close a tab. Close every tab you opened when done.",
 			InputSchema: obj(withTab(map[string]any{}), "tabId"), Annotations: destructive,
 			run: postTool("/tab", map[string]any{"action": "close"})},
 		{Name: "tab_focus", Description: "Bring a tab to the front (matters for headed mode and some focus-dependent pages).",
 			InputSchema: obj(withTab(map[string]any{}), "tabId"), Annotations: sideEffects,
 			run: postTool("/tab", map[string]any{"action": "focus"})},
-		{Name: "tab_lock", Description: "Reserve a tab for exclusive use by an owner name (multi-agent coordination).",
-			InputSchema: obj(withTab(map[string]any{"owner": pStr("Owner name"), "timeoutSec": pNum("Lock lifetime in seconds")}), "tabId", "owner"),
+		{Name: "tab_lock", Description: "Reserve a tab so other agents can't change it (they get an error until it is unlocked or expires).",
+			InputSchema: obj(withTab(map[string]any{"owner": pStr("Owner name (default: this MCP session)"), "timeoutSec": pNum("Lock lifetime in seconds (max 300)")}), "tabId"),
 			Annotations: sideEffects, run: postTool("/tab/lock", nil)},
 		{Name: "tab_unlock", Description: "Release a tab lock.",
-			InputSchema: obj(withTab(map[string]any{"owner": pStr("Owner name")}), "tabId", "owner"),
+			InputSchema: obj(withTab(map[string]any{"owner": pStr("Owner name (default: this MCP session)")}), "tabId"),
 			Annotations: sideEffects, run: postTool("/tab/unlock", nil)},
 
 		// Navigation & reading
-		{Name: "navigate", Description: "Load a URL, or go back/forward/reload. Waits until the document is interactive. Returns url and title.",
+		{Name: "navigate", Description: "Load a URL, or go back/forward/reload. Returns url and title.",
 			InputSchema: obj(withTab(map[string]any{
 				"url":         pStr("URL to load (type=url)"),
 				"type":        pEnum("Navigation type (default url)", "url", "back", "forward", "reload"),
+				"waitUntil":   pEnum("domcontentloaded (default), load, or networkidle", "domcontentloaded", "load", "networkidle"),
 				"ignoreCache": pBool("Reload bypassing the cache"),
-				"newTab":      pBool("Open in a new tab instead (returns tabId)"),
-				"timeout":     pNum("Navigation timeout in seconds (default 30, max 120)"),
-				"waitTitle":   pNum("Seconds to wait for a non-empty title (default 2)"),
-				"blockImages": pBool("Skip loading images for this navigation"),
-				"blockMedia":  pBool("Skip images, fonts, CSS and media"),
+				"newTab":      pBool("Open in a new tab (returns tabId)"),
+				"context":     pStr("With newTab: isolated context name"),
+				"timeout":     pNum("Seconds (default 30, max 120)"),
+				"waitTitle":   pNum("Seconds to wait for a title set by JS"),
+				"blockImages": pBool("Skip images"),
+				"blockMedia":  pBool("Skip images, fonts, CSS, media"),
 			})), Annotations: sideEffects, run: postTool("/navigate", nil)},
-		{Name: "get_text", Description: "Readable text of the page (cheapest way to read content, ~800 tokens). mode=raw returns full document.body.innerText.",
-			InputSchema: obj(withTab(map[string]any{"mode": pEnum("readability (default) or raw", "readability", "raw")})),
-			Annotations: readOnly, run: getTool("/text", nil)},
-		{Name: "snapshot", Description: "Accessibility-tree snapshot with element refs (e0, e1 …) used by click/fill/etc. Defaults to interactive elements in compact format; filter=all for every node, diff=true for only changes since the last snapshot.",
+		{Name: "get_text", Description: "Page text, including iframes. readability (default): main content without navigation/ads. markdown: headings, lists, links with URLs, tables. raw: all visible text. Long pages are paged: pass offset=nextOffset to continue.",
 			InputSchema: obj(withTab(map[string]any{
+				"mode":     pEnum("readability (default), markdown or raw", "readability", "markdown", "raw"),
+				"maxChars": pNum("Characters per call (default 30000)"),
+				"offset":   pNum("Start at this character (from nextOffset)"),
+			})),
+			Annotations: readOnly, run: getTool("/text", map[string]any{"maxChars": 30000.0})},
+		{Name: "snapshot", Description: "Interactive elements with refs for click/fill/etc. (e12; f1e3 = inside iframe f1). Refs stay valid while the element exists. viewport=true: only what is on screen. diff=true: only changes since the last snapshot. filter=all: full accessibility tree (main frame).",
+			InputSchema: obj(withTab(map[string]any{
+				"viewport":  pBool("Only elements currently visible on screen"),
+				"links":     pBool("Include link URLs"),
 				"filter":    pEnum("interactive (default) or all", "interactive", "all"),
-				"format":    pEnum("compact (default), text, json or yaml", "compact", "text", "json", "yaml"),
-				"diff":      pBool("Only nodes added/changed/removed since the previous snapshot"),
+				"format":    pEnum("Output format (default compact)", "compact", "text", "json", "yaml"),
+				"diff":      pBool("Only changes since the last snapshot"),
 				"depth":     pNum("Max tree depth"),
-				"selector":  pStr("Limit to the subtree of this CSS selector"),
-				"maxTokens": pNum("Truncate output to roughly this many tokens"),
+				"selector":  pStr("Only inside this CSS selector"),
+				"maxTokens": pNum("Truncate to ~N tokens"),
+				"maxNodes":  pNum("Stop after this many elements (default 5000)"),
 			})), Annotations: readOnly, run: snapshotTool},
-		{Name: "screenshot", Description: "Screenshot of the viewport, the full page or one element. Returned as an image unless path is given. Use sparingly: get_text/snapshot are far cheaper.",
+		{Name: "screenshot", Description: "Screenshot of the viewport, the full page or one element. Returned as an image (scaled to ≤1568px) unless path is given (full resolution). Use sparingly: get_text/snapshot are far cheaper.",
 			InputSchema: obj(withTarget(map[string]any{
 				"format":   pEnum("jpeg (default), png or webp", "jpeg", "png", "webp"),
 				"quality":  pNum("JPEG/WebP quality 0-100 (default 80)"),
-				"fullPage": pBool("Capture the whole scrollable page"),
+				"fullPage": pBool("Capture the whole scrollable page (tall pages get scaled down; use path for full size)"),
+				"maxDim":   pNum("Longest image side in pixels (default 1568 when returned inline)"),
 				"path":     pStr("Save to this file path instead of returning the image"),
 			})), Annotations: readOnly, run: screenshotTool},
 		{Name: "inspect_element", Description: "Details of one element: tag, attributes, text, value, bounding box, visibility; optionally outerHTML and computed styles.",
@@ -425,7 +448,7 @@ func mcpTools() []mcpTool {
 				"html":   pBool("Include outerHTML (max 20KB)"),
 				"styles": pEnum("Computed styles: true = common subset, all = every property", "true", "all"),
 			})), Annotations: readOnly, run: getTool("/element", nil)},
-		{Name: "wait_for", Description: "Wait until text appears (any of a list), a selector exists (or is gone), the URL contains a string, and/or the network is idle.",
+		{Name: "wait_for", Description: "Wait until any of the texts appears, a selector exists (or is gone), the URL matches and/or the network is idle. Reacts instantly to DOM changes.",
 			InputSchema: obj(withTab(map[string]any{
 				"text":        pArr(map[string]any{"type": "string"}, "Resolve when any of these strings is on the page"),
 				"selector":    pStr("CSS selector that must exist"),
@@ -465,7 +488,7 @@ func mcpTools() []mcpTool {
 			InputSchema: obj(withTarget(map[string]any{"value": pStr("Option value or label")}), "value"), Annotations: sideEffects, run: actionTool(actionSelect)},
 		{Name: "scroll", Description: "Scroll an element into view (ref/selector) or the page by x/y pixels (default 800 down).",
 			InputSchema: obj(withTarget(map[string]any{"x": pNum("Horizontal pixels"), "y": pNum("Vertical pixels")})), Annotations: sideEffects, run: scrollTool},
-		{Name: "drag", Description: "Drag an element (ref/selector) onto another element (toRef/toSelector) or to coordinates x/y. Handles HTML5 draggable and mouse-based drag libraries.",
+		{Name: "drag", Description: "Drag an element onto another (toRef/toSelector) or to x/y. Works for HTML5 and mouse-based drag & drop.",
 			InputSchema: obj(withTarget(map[string]any{
 				"toRef": pStr("Drop target ref"), "toSelector": pStr("Drop target CSS selector"),
 				"x": pNum("Drop X (if no target element)"), "y": pNum("Drop Y"),
@@ -480,18 +503,18 @@ func mcpTools() []mcpTool {
 			}), "actions"), Annotations: sideEffects, run: postTool("/actions", nil)},
 
 		// Scripting
-		{Name: "evaluate", Description: "Run JavaScript in the page and return the JSON result; promises are awaited, so `await fetch('/api/…').then(r => r.json())` works with the page's cookies. With ref/selector the expression must be a function receiving the element, e.g. \"el => el.innerText\".",
+		{Name: "evaluate", Description: "Run JavaScript in the page, return the JSON result. Promises are awaited: fetch('/api/x').then(r => r.json()) runs with the page's cookies. With ref/selector pass a function, e.g. el => el.innerText.",
 			InputSchema: obj(withTarget(map[string]any{"expression": pStr("JavaScript expression or function")}), "expression"),
 			Annotations: sideEffects, run: postTool("/evaluate", nil)},
 
 		// DevTools: network & console
-		{Name: "network_requests", Description: "List network requests of the tab since the last navigation (all=true for older ones). Filter by type (XHR, Fetch, Document, Script, Image …), URL substring, method, status (2xx, 4xx, failed, 404). Use network_request for headers and bodies.",
+		{Name: "network_requests", Description: "Network requests since the last navigation. Use network_request for headers and body.",
 			InputSchema: obj(withTab(map[string]any{
-				"type":    pArr(map[string]any{"type": "string"}, "Resource types, e.g. [\"XHR\",\"Fetch\"]"),
+				"type":    pArr(map[string]any{"type": "string"}, "e.g. [\"XHR\",\"Fetch\",\"Document\"]"),
 				"filter":  pStr("URL contains (case-insensitive)"),
 				"method":  pStr("HTTP method"),
-				"status":  pStr("2xx, 3xx, 4xx, 5xx, failed or an exact code"),
-				"all":     pBool("Include requests from previous navigations still in the buffer"),
+				"status":  pStr("2xx, 4xx, failed or a code"),
+				"all":     pBool("Include previous navigations"),
 				"headers": pBool("Include request/response headers"),
 				"limit":   pNum("Max entries (default 100)"),
 				"offset":  pNum("Skip this many matches"),
@@ -504,6 +527,21 @@ func mcpTools() []mcpTool {
 				"saveTo":   pStr("Write the full body to this file path"),
 				"base64":   pBool("Return binary bodies as base64"),
 			}), "id"), Annotations: readOnly, run: getTool("/network/request", nil)},
+		{Name: "websocket_messages", Description: "WebSocket frames (sent/received) and Server-Sent Events of the tab since the last navigation — live data of chat, trading or dashboard apps.",
+			InputSchema: obj(withTab(map[string]any{
+				"filter": pStr("Connection URL contains"),
+				"dir":    pEnum("Only this direction", "sent", "received", "sse"),
+				"all":    pBool("Include previous navigations"),
+				"limit":  pNum("Newest N messages (default 50)"),
+			})), Annotations: readOnly, run: getTool("/network/websocket", nil)},
+		{Name: "export_har", Description: "Save the tab's network log as a HAR file (opens in Chrome DevTools, Charles, Postman). bodies=true includes response bodies.",
+			InputSchema: obj(withTab(map[string]any{
+				"path":   pStr("Output .har path (required)"),
+				"bodies": pBool("Include request/response bodies"),
+				"all":    pBool("Include previous navigations"),
+			}), "path"), Annotations: readOnly, run: getTool("/network/har", nil)},
+		{Name: "performance_metrics", Description: "Page timing and Web Vitals (TTFB, FCP, LCP, CLS, load) plus Chrome runtime metrics (JS heap, DOM nodes, layout counts).",
+			InputSchema: obj(withTab(map[string]any{})), Annotations: readOnly, run: getTool("/performance", nil)},
 		{Name: "console_messages", Description: "Console output, uncaught exceptions and browser log entries since the last navigation.",
 			InputSchema: obj(withTab(map[string]any{
 				"level": pArr(map[string]any{"type": "string"}, "Levels to keep: log, info, warn, error, debug, verbose"),
@@ -520,16 +558,16 @@ func mcpTools() []mcpTool {
 			}), "action"), Annotations: sideEffects, run: postTool("/dialog", nil)},
 
 		// Emulation & output
-		{Name: "emulate", Description: "Emulate device and environment for a tab: viewport (\"390x844x3,mobile,touch\" or \"reset\"), userAgent (\"\" clears), colorScheme, reducedMotion, geolocation (\"lat,lng\" or \"reset\"), network throttling, CPU throttling, extra HTTP headers, timezone, locale.",
+		{Name: "emulate", Description: "Emulate device/environment for a tab. Each field is optional; \"reset\", \"auto\" or \"\" undo it.",
 			InputSchema: obj(withTab(map[string]any{
-				"viewport":      pStr("WIDTHxHEIGHT[xDPR][,mobile][,touch][,landscape] or reset"),
-				"userAgent":     pStr("User agent override; empty string clears"),
+				"viewport":      pStr("e.g. 390x844x3,mobile,touch or reset"),
+				"userAgent":     pStr("User agent; \"\" restores the default"),
 				"colorScheme":   pEnum("prefers-color-scheme", "dark", "light", "auto"),
 				"reducedMotion": pEnum("prefers-reduced-motion", "reduce", "no-preference", "auto"),
 				"geolocation":   pStr("\"lat,lng\" or reset"),
 				"network":       pEnum("Network throttling", "Offline", "Slow 3G", "Fast 3G", "Slow 4G", "Fast 4G", "none"),
 				"cpuThrottling": pNum("CPU slowdown factor (1 = off)"),
-				"extraHeaders":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Headers added to every request"},
+				"extraHeaders":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Headers for every request"},
 				"timezone":      pStr("IANA timezone, e.g. Europe/Berlin"),
 				"locale":        pStr("ICU locale, e.g. de-DE"),
 			})), Annotations: sideEffects, run: postTool("/emulate", nil)},
@@ -582,6 +620,13 @@ func screenshotTool(ctx context.Context, s *mcpServer, args map[string]any) mcpR
 		args["output"] = "file"
 	} else {
 		args["raw"] = true
+		// Claude downsizes anything beyond ~1568px anyway; sending less is faster.
+		if _, ok := args["maxDim"]; !ok {
+			args["maxDim"] = 1568.0
+		}
+		if _, ok := args["quality"]; !ok {
+			args["quality"] = 75.0
+		}
 	}
 	return s.call(ctx, "GET", "/screenshot", toQuery(args), nil)
 }
@@ -674,4 +719,11 @@ func clearLogsTool(ctx context.Context, s *mcpServer, args map[string]any) mcpRe
 		}
 	}
 	return mcpResult{Content: []mcpContent{{Type: "text", Text: fmt.Sprintf(`{"clearedNetwork":%t,"clearedConsole":%t}`, clearNet, clearCon)}}}
+}
+
+func contextsTool(ctx context.Context, s *mcpServer, args map[string]any) mcpResult {
+	if name := strArg(args, "close"); name != "" {
+		return s.call(ctx, "POST", "/context", nil, map[string]any{"action": "close", "name": name})
+	}
+	return s.call(ctx, "GET", "/contexts", nil, nil)
 }

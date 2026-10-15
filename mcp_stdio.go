@@ -23,6 +23,9 @@ import (
 // background if none is reachable. All MCP clients therefore share one
 // Chrome instead of each spawning their own.
 
+// mcpOwner names this MCP session for tab locks (one process per client session).
+var mcpOwner = envOr("SEEBRO_OWNER", fmt.Sprintf("mcp-%d", os.Getpid()))
+
 func runMCPStdio() {
 	base := strings.TrimRight(envOr("SEEBRO_URL", "http://127.0.0.1:"+port), "/")
 	client := &http.Client{Timeout: 3 * time.Minute}
@@ -84,6 +87,7 @@ func forwardMCP(client *http.Client, base string, msg []byte, logf func(string, 
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
+		req.Header.Set("X-Seebro-Owner", mcpOwner) // identifies this agent for tab locks
 		return client.Do(req)
 	}
 
@@ -154,6 +158,9 @@ func ensureServer(base string, logf func(string, ...any)) error {
 		return err
 	}
 	logPath := filepath.Join(stateDir, "seebro.log")
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > 10<<20 {
+		_ = os.Rename(logPath, logPath+".1") // keep one old log, drop older ones
+	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err
