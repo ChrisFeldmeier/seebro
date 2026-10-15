@@ -2,7 +2,48 @@
 
 ## Unreleased
 
-### MCP server
+### Performance
+- In-page snapshot engine (isolated world) for interactive snapshots: Wikipedia 1,248 ms → 77 ms, GitHub 251 ms → 18 ms; `viewport=true` cuts output to what is on screen (83 KB → 2.6 KB)
+- Stable refs: `e12` keeps pointing at the same element across snapshots; refs from a previous page fail as "stale" instead of hitting another element
+- Typing uses `Input.insertText` (300 chars: 495 ms → 7 ms); navigation no longer waits 2 s for a missing `<title>`; `waitUntil: load|networkidle`
+- `wait_for` reacts instantly via MutationObserver
+- Text and snapshot read URL/title in the same round trip
+
+### New
+- iframes, including cross-origin ones, in snapshots, text and actions (refs `f1e3`)
+- `/text` modes `markdown` (headings, lists, links, tables) and paging (`maxChars`, `offset`, `nextOffset`); text is read from the live DOM (line breaks preserved)
+- WebSocket/SSE capture (`/network/websocket`), HAR export (`/network/har`), performance metrics and Web Vitals (`/performance`)
+- Isolated browser contexts (`"context": "name"` on new tabs, `/contexts`, `/context`)
+- Tab health: hung/crashed tabs are detected (504 with instructions), `POST /tab {"action":"reset"}`; idle tabs close after 30 min headless (`BRIDGE_TAB_IDLE`)
+- Tab locks are enforced (423) by owner (`X-Seebro-Owner`, sent per session by `seebro mcp`)
+- Screenshots: `maxDim` scaling (MCP default 1568 px), full page / tall elements without `captureBeyondViewport`
+- MCP: `tab_reset`, `contexts`, `websocket_messages`, `export_har`, `performance_metrics` (43 tools)
+
+### Security
+- Listens on 127.0.0.1 by default (`BRIDGE_BIND`); a token is generated and required when binding elsewhere
+- Requests from web pages (Origin / Sec-Fetch-Site) and foreign Host headers are rejected (CSRF, DNS rebinding); CORS only for `BRIDGE_ALLOWED_ORIGINS`, never `*`
+- Output paths may not write into hidden files/folders outside the state dir
+
+### Stealth
+- `navigator.webdriver` is `false` via `--disable-blink-features=AutomationControlled`
+- User agent and client hints without "HeadlessChrome" (headless)
+- Removed detectable overrides (fake plugins, platform, webdriver=undefined); injected script has no globals and native-looking `toString()`
+- `/stealth/status` runs real checks instead of reporting fixed values; bot.sannysoft.com passes completely
+
+### Fixes
+- Full-page screenshots of long pages wedged the tab forever (Chrome 155)
+- `/text` glued lines together (text of a detached DOM clone)
+- Isolated worlds are bound to the document; context ids repeat after cross-site navigation
+- Restored tabs ran without the stealth script; restore is now off in headless mode (`BRIDGE_RESTORE`)
+
+### Changed
+- Accessibility-tree refs (`filter=all`) are now `a0, a1 …`; `e…` refs come from the snapshot engine
+- Chrome starts without site isolation (`BRIDGE_SITE_ISOLATION=true` to keep it) and with background services disabled (`BRIDGE_LEAN=false` to keep them)
+- Successful requests are logged at debug level (`BRIDGE_LOG_LEVEL`); `seebro mcp` rotates its log at 10 MB
+- Calls without `tabId` use the last tab used instead of the first one
+- CI on Node 24 actions; goreleaser publishes to ChrisFeldmeier/seebro
+
+### MCP server (first part)
 - `seebro mcp` — stdio MCP server for Claude Code / Claude Desktop; proxies to the running server and starts it headless if needed
 - `POST /mcp` — Streamable HTTP MCP endpoint on the normal port (same auth)
 - 38 tools covering the whole HTTP API (shutdown excluded); screenshots are returned as images, open JS dialogs are reported on every call
