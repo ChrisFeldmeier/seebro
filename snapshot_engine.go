@@ -61,9 +61,9 @@ type jsSnapshot struct {
 // frameRefs is the per-tab bookkeeping for isolated worlds and frame indexes.
 type frameRefs struct {
 	mu      sync.Mutex
-	worlds  map[string]runtime.ExecutionContextID // frameID → isolated world
-	index   map[string]int                        // frameID → n in "f<n>"
-	frames  map[int]string                        // n → frameID
+	worlds  map[string]worldEntry // frameID → isolated world
+	index   map[string]int        // frameID → n in "f<n>"
+	frames  map[int]string        // n → frameID
 	nextIdx int
 	nextID  int64
 	snapped bool // a snapshot was taken at least once
@@ -78,7 +78,7 @@ func (b *Bridge) frameRefsFor(tabID string) *frameRefs {
 	fr := b.refs[tabID]
 	if fr == nil {
 		fr = &frameRefs{
-			worlds:  map[string]runtime.ExecutionContextID{},
+			worlds:  map[string]worldEntry{},
 			index:   map[string]int{tabID: 0},
 			frames:  map[int]string{0: tabID},
 			nextIdx: 1, nextID: 1,
@@ -108,24 +108,64 @@ func refName(frameIdx int, id int64) string {
 	return "f" + strconv.Itoa(frameIdx) + "e" + strconv.FormatInt(id, 10)
 }
 
+// worldEntry is an isolated world bound to one document (loaderID).
+// Execution context ids are only unique per renderer process: after a
+// cross-site navigation a cached id may point at an unrelated context.
+type worldEntry struct {
+	id     runtime.ExecutionContextID
+	loader string
+}
+
 func isContextGone(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := err.Error()
 	return strings.Contains(s, "Cannot find context") || strings.Contains(s, "context was destroyed") ||
-		strings.Contains(s, "No frame") || strings.Contains(s, "Frame with the given id")
+		strings.Contains(s, "No frame") || strings.Contains(s, "Frame with the given id") ||
+		strings.Contains(s, "__sb is not defined")
+}
+
+// loaderOf returns the current document (loader) id of a frame, "" if unknown.
+func loaderOf(ctx context.Context, frameID string) string {
+	var tree *page.FrameTree
+	if chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		var e error
+		tree, e = page.GetFrameTree().Do(ctx)
+		return e
+	})) != nil || tree == nil {
+		return ""
+	}
+	var find func(t *page.FrameTree) string
+	find = func(t *page.FrameTree) string {
+		if t.Frame != nil && string(t.Frame.ID) == frameID {
+			return string(t.Frame.LoaderID)
+		}
+		for _, c := range t.ChildFrames {
+			if l := find(c); l != "" {
+				return l
+			}
+		}
+		return ""
+	}
+	return find(tree)
 }
 
 // world returns the frame's isolated world with the engine loaded, creating it
-// when missing (create=true) — e.g. after a navigation replaced the document.
-func (b *Bridge) world(ctx context.Context, fr *frameRefs, frameID string, create bool) (runtime.ExecutionContextID, error) {
-	fr.mu.Lock()
-	id, ok := fr.worlds[frameID]
-	fr.mu.Unlock()
-	if ok {
-		return id, nil
+// when missing or bound to an older document (create=true). loader "" skips
+// the document check (ref lookups, where a mismatch surfaces as an error).
+func (b *Bridge) world(ctx context.Context, fr *frameRefs, frameID string, create bool, loader ...string) (runtime.ExecutionContextID, error) {
+	want := ""
+	if len(loader) > 0 {
+		want = loader[0]
 	}
+	fr.mu.Lock()
+	entry, ok := fr.worlds[frameID]
+	fr.mu.Unlock()
+	if ok && (want == "" || entry.loader == want) {
+		return entry.id, nil
+	}
+	var id runtime.ExecutionContextID
 	if !create {
 		return 0, fmt.Errorf("page changed since the last snapshot")
 	}
@@ -145,7 +185,7 @@ func (b *Bridge) world(ctx context.Context, fr *frameRefs, frameID string, creat
 		return 0, err
 	}
 	fr.mu.Lock()
-	fr.worlds[frameID] = id
+	fr.worlds[frameID] = worldEntry{id: id, loader: want}
 	fr.mu.Unlock()
 	return id, nil
 }
@@ -176,6 +216,7 @@ func callWorld(ctx context.Context, worldID runtime.ExecutionContextID, expr str
 type frameInfo struct {
 	id     string
 	url    string
+	loader string
 	dx, dy float64 // offset of the frame's viewport in the main viewport
 }
 
@@ -193,13 +234,14 @@ func (b *Bridge) frames(ctx context.Context, tabID string) []frameInfo {
 	}
 	out[0].id = string(tree.Frame.ID)
 	out[0].url = tree.Frame.URL
+	out[0].loader = string(tree.Frame.LoaderID)
 	var walk func(t *page.FrameTree)
 	walk = func(t *page.FrameTree) {
 		for _, c := range t.ChildFrames {
 			if c.Frame == nil {
 				continue
 			}
-			fi := frameInfo{id: string(c.Frame.ID), url: c.Frame.URL}
+			fi := frameInfo{id: string(c.Frame.ID), url: c.Frame.URL, loader: string(c.Frame.LoaderID)}
 			ok := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 				backend, _, err := dom.GetFrameOwner(c.Frame.ID).Do(ctx)
 				if err != nil {
@@ -258,7 +300,7 @@ func (b *Bridge) jsSnapshot(ctx context.Context, tabID string, o jsSnapshotOptio
 		var err error
 		for attempt := 0; attempt < 2; attempt++ {
 			var wid runtime.ExecutionContextID
-			if wid, err = b.world(ctx, fr, f.id, true); err != nil {
+			if wid, err = b.world(ctx, fr, f.id, true, f.loader); err != nil {
 				break
 			}
 			expr := "__sb.snapshot(" + string(opts) + ")"

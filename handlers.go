@@ -699,7 +699,7 @@ func (b *Bridge) crossOriginFrameText(ctx context.Context, tabID, mainURL, opts 
 		if err != nil || u.Scheme == "about" || u.Scheme == "data" || (u.Scheme == main.Scheme && u.Host == main.Host) {
 			continue
 		}
-		wid, err := b.world(ctx, fr, f.id, true)
+		wid, err := b.world(ctx, fr, f.id, true, f.loader)
 		if err != nil {
 			continue
 		}

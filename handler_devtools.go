@@ -365,7 +365,7 @@ func (b *Bridge) handleWait(w http.ResponseWriter, r *http.Request) {
 				step = min(step, 200*time.Millisecond)
 			}
 			var res string
-			wid, err := b.world(ctx, fr, tabID, true)
+			wid, err := b.world(ctx, fr, tabID, true, loaderOf(ctx, tabID))
 			if err == nil {
 				tCtx, tCancel := context.WithTimeout(ctx, step+2*time.Second)
 				err = callWorld(tCtx, wid, waitJS(max(step.Milliseconds(), 0)), &res)
