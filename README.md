@@ -4,7 +4,8 @@
 
 <p align="center">
   <strong>Give your AI agent eyes.</strong><br/>
-  ~9 MB binary. HTTP API + MCP server. 10x cheaper than screenshots.<br/><br/>
+  ~9 MB binary. HTTP API + MCP server. 10x cheaper than screenshots.<br/>
+  Whole navigations in one call, steered by a tiny decision model.<br/><br/>
   🪼 <em>See the web through your agent's eyes</em>
 </p>
 
@@ -22,7 +23,7 @@
 
 Browser automation tools are designed for humans, not agents. Playwright, Puppeteer and Selenium return massive DOM dumps or screenshots that burn through tokens. Most agent-specific solutions are locked into their own ecosystems.
 
-Seebro takes a different approach: **compact text and element refs over HTTP and MCP**. One small Go binary controls Chrome. Any agent can drive it with plain HTTP calls, and Claude (or any other MCP client) can use it as a native toolset.
+Seebro takes a different approach: **compact text and element refs over HTTP and MCP**. One small Go binary controls Chrome (or the lightweight obscura engine). Any agent can drive it with plain HTTP calls, and Claude (or any other MCP client) can use it as a native toolset. For plain navigation the agent doesn't even have to steer step by step: `/goal` hands "get me to the pricing page" to a small decision model and returns when it's there.
 
 ```bash
 # Interactive elements on screen — ~650 tokens for a Wikipedia article
@@ -30,6 +31,9 @@ curl "localhost:9867/snapshot?filter=interactive&format=compact&viewport=true"
 
 # Act on them by ref
 curl -X POST localhost:9867/action -d '{"kind":"click","ref":"e12"}'
+
+# Or hand over a whole navigation: one call, several clicks
+curl -X POST localhost:9867/goal -d '{"task":"Find the pricing page","startUrl":"https://vercel.com"}'
 
 # Or let Claude drive it directly
 claude mcp add seebro -- seebro mcp
@@ -43,14 +47,15 @@ claude mcp add seebro -- seebro mcp
 | **iframes** | Snapshots, text and actions reach into **iframes, including cross-origin** ones (payment forms, embedded logins, editors) |
 | **Interaction** | Click, double click, click at coordinates, type (fast `insertText`), fill (React/Vue-safe), whole forms in one call, keys and combos (`Enter`, `Control+A`), hover, select, scroll, drag & drop (HTML5 + mouse), file upload, human-like mouse and typing |
 | **Navigation** | Load URLs, back / forward / reload, `waitUntil` load / network idle, wait for text / element / URL (reacts instantly to DOM changes), multiple tabs |
-| **Goal navigation** | `POST /goal` / `navigate_goal`: a whole multi-step browsing task in **one call**, steered by the Jev decision model (or an offline matcher), with stop gates, recovery and a step trace |
+| **Goal navigation** | `POST /goal` / `navigate_goal`: a whole multi-step navigation in **one call**. The Jev decision model (TypeSafe, OpenRouter or Vercel AI Gateway) picks each click, search or dropdown choice; an offline matcher works without a key and takes over when a model call fails. Stop gates, no-effect recovery, bot-wall detection and a step trace with confidences and cost |
+| **Engines** | Chrome (default) or **obscura**, a Rust headless browser using ~20x less memory; both together in one server, chosen per tab |
 | **DevTools** | Network log with headers, POST data and response bodies, **WebSocket and Server-Sent Events**, console and uncaught exceptions, JS dialogs, **HAR export**, **performance metrics and Web Vitals** |
 | **Emulation** | Mobile viewports and touch, dark mode, reduced motion, geolocation, network and CPU throttling, user agent, extra headers, timezone, locale |
-| **Output** | Screenshots (JPEG/PNG/WebP; viewport, full page or element; auto-scaled for LLMs), **screen recording to MP4** with highlighted clicks, PDF export, downloads (CSV/PDF exports land in a known folder) |
+| **Output** | Screenshots (JPEG/PNG/WebP; viewport, full page or element; auto-scaled for LLMs), **screen recording to MP4** in real time with every click and input highlighted, PDF export, downloads (CSV/PDF exports land in a known folder) |
 | **Scripting** | JavaScript in the page with awaited promises: `fetch('/api/…')` runs with the page's own login |
 | **Sessions** | Persistent Chrome profile (logins survive restarts), cookies, **isolated incognito-like contexts** for parallel agents or second accounts |
 | **Multi-agent** | One shared browser for all MCP clients, tab locks that are actually enforced, per-session identity |
-| **Robustness** | Hung or crashed tabs are detected and can be reset; idle tabs are closed automatically; JS dialogs never block a call |
+| **Robustness** | Hung or crashed tabs are detected and can be reset; idle tabs are closed automatically; JS dialogs never block a call; Cloudflare challenge and block pages are recognised instead of clicked around on |
 | **Stealth** | Passes common bot checks: no `webdriver` flag, no "HeadlessChrome" in user agent or client hints, real plugins, native-looking overrides, live self-check |
 | **Security** | Loopback by default, web pages can't reach the API (CSRF/DNS-rebinding guard), token enforced beyond loopback |
 | **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 46 tools), Claude skill |
@@ -62,6 +67,8 @@ claude mcp add seebro -- seebro mcp
 | **Token cost** | ~650 (on-screen elements) / ~800 (text) | 10,000+ (full DOM/screenshot) |
 | **Interface** | HTTP + MCP – works with any agent | Framework-specific |
 | **Output format** | Compact refs, text, markdown | Raw HTML or pixels |
+| **Multi-step navigation** | One `/goal` call, a small model decides each step (~$0.0002–0.0006 per step) | One large-model round trip per click |
+| **Engines** | Chrome or obscura (32 MB idle), per tab | One browser |
 | **Bot detection** | Built-in, self-checking stealth | Manual configuration |
 | **Session handling** | Persistent profile + isolated contexts | Usually ephemeral |
 | **Deployment** | Single ~9 MB binary | Complex dependencies |
@@ -110,46 +117,92 @@ MCP: `tab_new {url, engine: "obscura"}`. `health` lists the available engines.
 
 ## Goal Navigation with Jev (seebro-speed)
 
-Normally an agent drives Seebro one call at a time: snapshot → think → click → wait → snapshot. Every hop costs a full round trip through a large model. `POST /goal` (MCP: `navigate_goal`) hands the whole navigation to a **small decision model** instead and returns when the goal is reached:
+Normally an agent drives Seebro one call at a time: snapshot → think → click → wait → snapshot. Every hop costs a full round trip through a large model, and every intermediate page passes through its context. `POST /goal` (MCP: `navigate_goal`) hands the whole navigation to a **small decision model** instead and returns when the goal is reached.
+
+**Set up** (once): give Seebro one Jev key. Without a key `/goal` still works with the offline matcher.
+
+```bash
+AI_GATEWAY_API_KEY=vck_… seebro          # Vercel AI Gateway (needs paid gateway credits)
+# or TYPESAFE_API_KEY=…  /  OPENROUTER_API_KEY=sk-or-…
+```
+
+**Use:**
 
 ```bash
 curl -X POST localhost:9867/goal -H "Authorization: Bearer $TOKEN" -d '{
-  "task": "Go from Coffee to Espresso, then to the Ristretto article",
-  "startUrl": "https://en.wikipedia.org/wiki/Coffee"
+  "task": "Go to the source code repository of the Go programming language on GitHub",
+  "startUrl": "https://go.dev/"
 }'
-# → {"status":"done","final_url":".../wiki/Ristretto","steps":[…],"usage":{"decider_calls":3,…}}
 ```
+
+```json
+{
+  "status": "done",
+  "decider": "auto(vercel:typesafe-ai/jev, fallback local)",
+  "final_url": "https://github.com/golang/go",
+  "elapsed_ms": 8042,
+  "steps": [
+    {"step": 1, "executed_action": "click_e128", "description": "link \"GitHub\" -> https://github.com/golang",
+     "top_probability": 0.98, "goal_done": 0.04, "stuck": 0.62, "decided_by": "vercel:typesafe-ai/jev",
+     "outcome": "navigated to https://github.com/golang"},
+    {"step": 2, "executed_action": "click_e160", "description": "link \"go\" -> /golang/go",
+     "top_probability": 0.98, "goal_done": 0.46, "outcome": "navigated to https://github.com/golang/go"},
+    {"step": 3, "proposed_action": "done", "top_probability": 0.73, "goal_done": 0.91, "outcome": "agent declared done"}
+  ],
+  "usage": {"decider_calls": 3, "input_tokens": 23949, "output_tokens": 3565, "est_cost_usd": 0.001006}
+}
+```
+
+From Claude: `navigate_goal {tabId, task, startUrl}`, then `get_text` on the page it ends on.
+
+### How a step works
 
 Each step:
 
 1. Seebro's snapshot engine lists the interactive elements; they become named options (`click_e73`, `search_e4`, `type_e9` / `submit_e9`, `select_e12`, plus `scroll_down`, `scroll_up`, `back`, `done`). Noise (edit links, citation markers, `javascript:`) and duplicate targets are dropped; when a page has more than 240 options, those that match the task survive the cap first.
 2. One decider call answers three independent questions: **which action?** (a probability per option), **is the goal reached?**, **are we stuck?**
 3. Stop gates run *before* acting (goal > 0.85, stuck > 0.85 after step 2, `done`). An action that had no visible effect and is proposed again is replaced by the next most probable one.
-4. Seebro executes the action, waits for the navigation or page update, and records the outcome in the history the decider sees next.
+4. Seebro executes the action, waits for the navigation or page update, and records the outcome in the history the decider sees next. The page it observes afterwards is reused for the next step, so a step costs one snapshot.
 
-The run stops on Cloudflare challenge or block pages (`status: "blocked"` with evidence and guidance) instead of clicking around on them.
+Search boxes get the `query` (default: the task's keywords) as real key presses and Enter; a search field hidden in a collapsed header is filled and its form submitted instead. Dropdowns get a second question, "which option?". Ordinary text fields are only filled from `inputs`, never with a guess. Don't put passwords in `inputs`; do logins yourself (or once in headed mode, the profile keeps the session).
+
+The run stops on Cloudflare challenge or block pages (`status: "blocked"` with evidence and guidance) instead of clicking around on them. Other end states: `goal_achieved` or `done` (arrived), `stuck`, `max_steps`, `max_seconds`, `error`.
+
+### Options
 
 | Field | Meaning |
 |---|---|
 | `task` | What to achieve (required) |
 | `startUrl` | Navigate here first; otherwise start from the tab's current page |
-| `decider` | `auto` (default: Jev when a key is set, the offline matcher otherwise, and per step when a Jev call fails), `jev` (Jev only; errors stop the run) or `local` (offline keyword matcher for simple link and search hops) |
+| `decider` | `auto` (default), `jev` or `local`, see [Deciders](#deciders) |
 | `maxSteps`, `maxSeconds` | Budgets (default 24 steps, 180 s) |
 | `query` | Text for search boxes (default: the task's keywords) |
 | `inputs` | `{"email": "a@b.c"}`: text for fields whose label contains the key. Without an entry nothing is typed into ordinary fields. |
 | `noTyping` | Only click, never type |
 | `record`, `recordPath` | Record the run as an MP4 |
 
-Everything runs inside the Seebro binary: its own Chrome, its own snapshot engine, and plain HTTPS calls to the model. No Playwright, Node or jev-browser is needed. Each step's `decided_by` (and `fallback_reason`) shows which decider answered.
+### Deciders
 
-**Deciders.** `jev` uses TypeSafe's Jev model (~0.4 s and ~$0.0001 per step). Set one key in Seebro's environment:
+Everything runs inside the Seebro binary: its own Chrome, its own snapshot engine, and plain HTTPS calls to the model. No Playwright, Node or jev-browser is needed.
+
+| `decider` | Behaviour |
+|---|---|
+| `auto` (default) | Jev when a key is configured, otherwise the offline matcher. If a Jev call fails after its retries (network, rate limit, credits used up, malformed answer), the matcher decides that step and the run continues. |
+| `jev` | Jev only; a failed call ends the run with `status: "error"` and the provider's message |
+| `local` | Offline keyword matcher: follows links named after the task's words in order and uses search boxes. Free and instant, fine for "go to X, then Y" and searches, no judgment |
+
+Each step's `decided_by` and `fallback_reason` show who answered and why.
+
+**Jev** is TypeSafe's decision model: it answers typed questions (pick one option, is this statement true?) with probabilities instead of generating text. Through the Vercel AI Gateway a step took 0.5–1 s and cost $0.0002–0.0006 (the billed cost is reported in `usage`). Set one key in Seebro's environment:
 
 | Variable | |
 |---|---|
 | `TYPESAFE_API_KEY` | TypeSafe API (`TYPESAFE_BASE_URL` to override the endpoint) |
 | `OPENROUTER_API_KEY` | OpenRouter decisions API (`sk-or-…`) |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway (`vck_…`, model `typesafe-ai/jev`; needs paid gateway credits, free tier is refused) |
-| `JEV_PROVIDER`, `JEV_MODEL` | Force a provider; pick a model snapshot (default `jev-latest`) |
+| `JEV_PROVIDER`, `JEV_MODEL` | Force a provider (`typesafe`, `openrouter`, `vercel`); pick a model snapshot (default `jev-latest`) |
+
+### Results
 
 **Measured** (Wikipedia, same decisions for every contestant, median of 3, same machine and Chrome):
 
@@ -163,6 +216,11 @@ With the real Jev model (Vercel AI Gateway) Seebro solved all of these open task
 
 The browser side of `/goal` is 1.1–1.3× faster than jev-browser. The real gain is in the agent: a three-hop navigation is **one tool call** instead of about nine, and none of the intermediate pages pass through the large model's context.
 
+### When to use it
+
+- **Good fit:** getting to a page ("pricing", "newest submissions", "the docs page about X"), following a known path, searching a site, the same navigation across many sites (monitoring, scraping) where a large model per click would be slow and expensive.
+- **Not a fit:** reading and judging content, filling forms with real data, logins, purchases or messages. Let the agent do those itself with the normal tools; `/goal` is for getting there.
+
 The loop design, the questions and the bot-wall detector are ported from [jev-browser](https://github.com/jkudish/jev-browser) (MIT, © Joey Kudish).
 
 ## Binary Size & Footprint
@@ -171,13 +229,13 @@ Release builds (`-ldflags "-s -w"`, as produced by goreleaser):
 
 | Platform | Size |
 |---|---|
-| macOS arm64 | 9.1 MB |
-| macOS amd64 | 9.6 MB |
-| Linux arm64 | 8.8 MB |
-| Linux amd64 | 9.4 MB |
-| Windows amd64 | 9.7 MB |
+| macOS arm64 | 9.3 MB |
+| macOS amd64 | 9.8 MB |
+| Linux arm64 | 9.0 MB |
+| Linux amd64 | 9.6 MB |
+| Windows amd64 | 9.9 MB |
 
-At runtime the Seebro process uses about 15 MB of RAM; Chrome runs as separate processes. Network, console and WebSocket logs are fixed-size per-tab ring buffers (300 / 200 / 200 entries); response bodies stay in Chrome (capped at 5 MB per resource, 25 MB per tab) and are fetched only when asked for. Chrome itself starts with background services disabled (~9% less memory than a default Chrome) and idle tabs are closed after 30 minutes in headless mode.
+At runtime the Seebro process uses about 15 MB of RAM; Chrome runs as separate processes. Network, console and WebSocket logs are fixed-size per-tab ring buffers (300 / 200 / 200 entries); response bodies stay in Chrome (capped at 5 MB per resource, 25 MB per tab) and are fetched only when asked for. Chrome itself starts with background services disabled (~9% less memory than a default Chrome) and idle tabs are closed after 30 minutes in headless mode. Goal navigation, the Jev client and the recorder add no dependencies; recording needs `ffmpeg` on the machine, obscura is a separate optional binary.
 
 ## Getting Started
 
@@ -201,7 +259,7 @@ With [OpenClaw](https://openclaw.ai) or Claude, ask your agent to set up Seebro.
 
 ## MCP Server (Claude & other MCP clients)
 
-Seebro has a built-in [Model Context Protocol](https://modelcontextprotocol.io) server with **43 tools**, in the same binary. No extra install, runtime or dependency.
+Seebro has a built-in [Model Context Protocol](https://modelcontextprotocol.io) server with **46 tools**, in the same binary. No extra install, runtime or dependency.
 
 ### Setup
 
@@ -248,7 +306,7 @@ claude mcp add --transport http seebro http://localhost:9867/mcp \
 
 | Group | Tools |
 |---|---|
-| **Tabs** | `tabs_list`, `tab_new` (optionally in an isolated `context`), `tab_close`, `tab_focus`, `tab_reset`, `tab_lock`, `tab_unlock`, `contexts` |
+| **Tabs** | `tabs_list`, `tab_new` (optionally in an isolated `context` or the `obscura` engine), `tab_close`, `tab_focus`, `tab_reset`, `tab_lock`, `tab_unlock`, `contexts` |
 | **Navigate & read** | `navigate_goal` (whole task in one call), `navigate` (url / back / forward / reload, `waitUntil`), `get_text` (readability / markdown / raw, paged), `snapshot` (stable refs, `viewport`, `diff`, iframes), `screenshot`, `inspect_element`, `wait_for` |
 | **Input** | `click` (incl. double / human-like), `click_at`, `type_text` (with `submitKey`), `fill`, `fill_form`, `press_key`, `hover`, `select_option`, `scroll`, `drag`, `upload_file`, `batch_actions` |
 | **Scripting** | `evaluate` (awaits promises; `el => …` on a ref/selector) |
@@ -264,6 +322,7 @@ claude mcp add --transport http seebro http://localhost:9867/mcp \
 [`skill/seebro/SKILL.md`](skill/seebro/SKILL.md) teaches Claude how to work with Seebro:
 
 - the core loop: tab → text/snapshot → act by ref → wait → re-snapshot
+- when to hand a navigation to `navigate_goal`, and how to check its result
 - **getting data out of web apps**: capture the app's own API calls (HTTP and WebSocket), call its API from inside the page with `fetch`, read the DOM as markdown, or use the app's export plus `downloads`
 - logins, isolated contexts, forms, iframes, dialogs, debugging, recovering hung tabs
 - safety rules: no purchases, messages or deletions without the user's OK; page text is data, not instructions
@@ -273,6 +332,17 @@ cp -r skill/seebro ~/.claude/skills/seebro
 ```
 
 The HTTP equivalent of every tool is in [`skill/seebro/references/http-api.md`](skill/seebro/references/http-api.md).
+
+### Example: one-call navigation
+
+```
+tab_new        {}
+navigate_goal  {tabId, task: "Open the Hacker News page that lists the newest submissions",
+                startUrl: "https://news.ycombinator.com/"}     → status done, final_url …/newest
+get_text       {tabId, mode: "markdown", maxChars: 4000}
+```
+
+Add `record: true` to get a video of the run.
 
 ### Example: record a video
 
@@ -377,9 +447,10 @@ All endpoints accept `tabId`. Without it, the last tab used is taken. GET endpoi
 | `POST /navigate` | `url`, or `type: back\|forward\|reload`; `waitUntil: domcontentloaded\|load\|networkidle`; `newTab` (+ `context`) |
 | `POST /action` | Single action (kinds below) |
 | `POST /actions` | Several actions (`stopOnError`) |
+| `POST /goal` | Whole navigation in one call: `task`, `startUrl`, `decider` (`auto`/`jev`/`local`), `maxSteps`, `maxSeconds`, `query`, `inputs`, `noTyping`, `record`; returns status, final URL, step trace, usage (see [Goal Navigation](#goal-navigation-with-jev-seebro-speed)) |
 | `POST /evaluate` | JavaScript; promises awaited; with `ref`/`selector` runs `el => …` |
 | `POST /wait` | `text` (one or many), `selector` (or `gone`), `url`, `networkIdle`, `timeout`; 408 on timeout |
-| `POST /tab` | `new` (+ `url`, `context`), `close`, `focus`, `reset` |
+| `POST /tab` | `new` (+ `url`, `context`, `engine: chrome\|obscura`), `close`, `focus`, `reset` |
 | `POST /tab/lock`, `/tab/unlock` | Reserve a tab; others get 423 until it is released or expires |
 | `POST /cookies` | Set cookies |
 | `POST /fingerprint/rotate` | New user agent, platform, screen, CPU cores |
@@ -413,7 +484,6 @@ All endpoints accept `tabId`. Without it, the last tab used is taken. GET endpoi
 | `POST /emulate` | `viewport` (`390x844x3,mobile,touch`), `userAgent`, `colorScheme`, `reducedMotion`, `geolocation`, `network` (`Slow 3G` … `Offline`), `cpuThrottling`, `extraHeaders`, `timezone`, `locale` |
 | `GET /performance` | TTFB, FCP, LCP, CLS, load, plus JS heap, DOM nodes, layout counts |
 | `GET /pdf` | Print to PDF (`path`, `landscape`, `printBackground`) |
-| `POST /goal` | Run a multi-step navigation task with the Jev decision model or `decider: "local"`; returns status, final URL, step trace with confidences, usage (see [Goal Navigation](#goal-navigation-with-jev-seebro-speed)) |
 | `POST /screencast/start`, `POST /screencast/stop` | Record the tab as a real-time MP4 (needs ffmpeg); clicks and typing are highlighted while recording (`path`, `maxWidth`, `maxHeight`, `quality`) |
 | `GET /downloads` | Downloads and files in the download folder |
 | `GET /contexts`, `POST /context` | List isolated contexts; `close` one (and its tabs) |
@@ -466,6 +536,10 @@ Environment variables (a config file at `~/.seebro/config.json` is also supporte
 | `BRIDGE_OBSCURA_WORKERS` | `1` | obscura worker processes |
 | `BRIDGE_OBSCURA_STEALTH` | `true` | obscura's own fingerprint + TLS impersonation |
 | `BRIDGE_OBSCURA_PRIVATE_NETWORK` | `true` | Let obscura open localhost/LAN URLs like Chrome does |
+| `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY` / `AI_GATEWAY_API_KEY` | – | Jev key for `/goal` (any one) |
+| `JEV_PROVIDER`, `JEV_MODEL` | auto, `jev-latest` | Force `typesafe`, `openrouter` or `vercel`; model snapshot |
+| `TYPESAFE_BASE_URL`, `AI_GATEWAY_EVALUATION_URL`, `OPENROUTER_DECISIONS_URL` | provider defaults | Override a Jev endpoint (proxies, tests) |
+| `FFMPEG_BINARY` | `ffmpeg` | ffmpeg used to encode screen recordings |
 | `CDP_URL` | – | Use an already running Chrome |
 | `CHROME_BINARY`, `CHROME_FLAGS` | – | Chrome path, extra flags |
 | `SEEBRO_URL` | `http://127.0.0.1:$BRIDGE_PORT` | Server used by `seebro mcp` |
@@ -497,13 +571,17 @@ Automation signals are removed at the browser level, where they leave no JavaScr
 ## Architecture
 
 ```
-┌─────────────┐  HTTP / MCP      ┌──────────┐                  ┌─────────┐
-│   Agent     │  ── JSON ───►    │  Seebro  │  ── CDP ───►     │ Chrome  │
-│  (any kind) │   req/res        │  (Go)    │   DevTools       │         │
-└─────────────┘                  └──────────┘                  └─────────┘
+┌─────────────┐  HTTP / MCP      ┌──────────────────────┐   CDP    ┌───────────────────┐
+│   Agent     │  ── JSON ───►    │        Seebro        │ ───────► │ Chrome            │
+│  (any kind) │   req/res        │         (Go)         │ ───────► │ obscura (optional)│
+└─────────────┘                  │  snapshot engine     │          └───────────────────┘
+                                 │  recorder, stealth   │  HTTPS   ┌───────────────────┐
+                                 │  /goal loop ─────────┼────────► │ Jev decision model│
+                                 └──────────────────────┘          │ (optional)        │
+                                                                   └───────────────────┘
 ```
 
-Seebro is a translation layer. Agents speak HTTP or MCP, Chrome speaks CDP. Seebro adds an in-page snapshot engine, records network and console activity, handles stealth, sessions and tab health, and compresses everything to save tokens. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Seebro is a translation layer. Agents speak HTTP or MCP, browsers speak CDP. Seebro adds an in-page snapshot engine, records network and console activity, handles stealth, sessions and tab health, compresses everything to save tokens, and can run whole navigations itself with a decision model. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Security Notice
 
@@ -531,12 +609,13 @@ Think of it as handing someone an unlocked laptop. Powerful when intentional. Da
 | [cdproto](https://github.com/chromedp/cdproto) | CDP types | MIT |
 | [gobwas/ws](https://github.com/gobwas/ws) | WebSocket | MIT |
 
-Everything else, including the MCP server, is Go standard library.
+Everything else, including the MCP server and the Jev client, is Go standard library. The goal-navigation loop and bot-wall detector are ported from [jev-browser](https://github.com/jkudish/jev-browser) (MIT); see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## Requirements
 
 - Go 1.25+ (or download a [release binary](https://github.com/ChrisFeldmeier/seebro/releases))
-- Chrome or Chromium
+- Chrome or Chromium (or obscura alone: `scripts/install-obscura.sh`)
+- Optional: `ffmpeg` for screen recordings (not in the Docker image), a Jev key for model-steered `/goal`
 
 ## Development
 
@@ -544,14 +623,25 @@ Everything else, including the MCP server, is Go standard library.
 git clone https://github.com/ChrisFeldmeier/seebro.git
 cd seebro
 go build -o seebro .
-go test ./...                       # unit tests, no Chrome needed
+go test ./...                       # ~200 unit tests, no Chrome or API key needed
 go test -tags integration ./...     # with a real headless Chrome
 
 # load test (see the script header for scenarios)
 python3 scripts/loadtest.py --write-site /tmp/seebro-site
 python3 -m http.server 8765 --bind 127.0.0.1 --directory /tmp/seebro-site &
 python3 scripts/loadtest.py --engine obscura --scenario flow --workers 4 --duration 60
+
+# recorded demo: Wikipedia search, scrolling, links, back
+python3 scripts/demo-wikipedia.py --out /tmp/seebro-wikipedia.mp4
 ```
+
+| Script | Purpose |
+|---|---|
+| `scripts/loadtest.py` | Load test for both engines (small, large, click-through, mixed, real sites) |
+| `scripts/demo-wikipedia.py` | Automated tour that produces a video |
+| `scripts/install-obscura.sh` | Install the obscura engine into `~/.seebro/bin` |
+| `scripts/install-autostart.sh` | Run Seebro at login (launchd / systemd) |
+| `scripts/check.sh` | The CI checks, locally |
 
 ## Contributors
 

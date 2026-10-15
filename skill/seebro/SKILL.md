@@ -73,7 +73,7 @@ Seebro can drive two browsers. Chrome is the default and supports everything. `t
 
 - `navigate_goal {tabId, task, startUrl?}` runs a multi-step navigation on its own ("find the pricing page", "go from Coffee to Espresso, then Ristretto", "search for X and open the result") and returns `status`, `final_url` and a step trace. Use it when the path is navigation, not judgment: it saves you a snapshot/click/wait round trip per hop.
 - It needs `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY` or `AI_GATEWAY_API_KEY` (Vercel) in Seebro's environment. Without a key the default `decider: "auto"` uses the offline keyword matcher (fine for named links and search boxes); with a key it uses Jev and falls back to the matcher for a step when a Jev call fails. `decider: "jev"` disables the fallback.
-- It only types into search boxes (`query`, default: the task's keywords) and fields you name in `inputs` (`{"email": "…"}`). It never enters passwords; do logins yourself.
+- It only types into search boxes (`query`, default: the task's keywords) and fields you name in `inputs` (`{"email": "…"}`). Never pass passwords in `inputs`; do logins yourself.
 - Check the result: `status` `goal_achieved`/`done` means the decider thinks it arrived. Read the page with `get_text` before you rely on it. `stuck`, `max_steps` or `blocked` mean take over manually; `blocked` includes guidance for Cloudflare walls.
 - `record: true` returns a video of the run.
 
