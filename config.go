@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -31,12 +32,17 @@ const (
 	actionScroll     = "scroll"
 	actionHumanClick = "humanClick"
 	actionHumanType  = "humanType"
+	actionDblClick   = "dblclick"
+	actionClickAt    = "clickAt"
+	actionDrag       = "drag"
+	actionUpload     = "upload"
 )
 
 // Tab actions for /tab endpoint.
 const (
 	tabActionNew   = "new"
 	tabActionClose = "close"
+	tabActionFocus = "focus"
 )
 
 //go:embed stealth.js
@@ -49,30 +55,41 @@ var readabilityJS string
 var welcomeHTML string
 
 var (
-	port             = envOr("BRIDGE_PORT", "9867")
-	cdpURL           = os.Getenv("CDP_URL") // empty = launch Chrome ourselves
-	token            = os.Getenv("BRIDGE_TOKEN")
-	stateDir         = envOr("BRIDGE_STATE_DIR", filepath.Join(homeDir(), ".seebro"))
-	headless         = os.Getenv("BRIDGE_HEADLESS") == "true"
-	noRestore        = os.Getenv("BRIDGE_NO_RESTORE") == "true"
-	profileDir       = envOr("BRIDGE_PROFILE", filepath.Join(homeDir(), ".seebro", "chrome-profile"))
-	chromeVersion    = envOr("BRIDGE_CHROME_VERSION", "144.0.7559.133")
-	timezone         = os.Getenv("BRIDGE_TIMEZONE") // e.g. "America/New_York"
-	blockImages      = os.Getenv("BRIDGE_BLOCK_IMAGES") == "true"
-	blockMedia       = os.Getenv("BRIDGE_BLOCK_MEDIA") == "true" // superset: images + fonts + CSS + video
-	chromeBinary     = os.Getenv("CHROME_BINARY")                // path to Chrome/Chromium binary
-	chromeExtraFlags = os.Getenv("CHROME_FLAGS")                 // extra flags (space-separated)
-	noAnimations     = os.Getenv("BRIDGE_NO_ANIMATIONS") == "true"
-	stealthLevel     = envOr("BRIDGE_STEALTH", "light") // "light" or "full"
-	actionTimeout    = 15 * time.Second
-	navigateTimeout  = 30 * time.Second
-	shutdownTimeout  = 10 * time.Second
-	waitNavDelay     = 1 * time.Second
+	port              = envOr("BRIDGE_PORT", "9867")
+	cdpURL            = os.Getenv("CDP_URL") // empty = launch Chrome ourselves
+	token             = os.Getenv("BRIDGE_TOKEN")
+	stateDir          = envOr("BRIDGE_STATE_DIR", filepath.Join(homeDir(), ".seebro"))
+	headless          = os.Getenv("BRIDGE_HEADLESS") == "true"
+	noRestore         = os.Getenv("BRIDGE_NO_RESTORE") == "true"
+	profileDir        = envOr("BRIDGE_PROFILE", filepath.Join(homeDir(), ".seebro", "chrome-profile"))
+	chromeVersion     = envOr("BRIDGE_CHROME_VERSION", "144.0.7559.133")
+	timezone          = os.Getenv("BRIDGE_TIMEZONE") // e.g. "America/New_York"
+	blockImages       = os.Getenv("BRIDGE_BLOCK_IMAGES") == "true"
+	blockMedia        = os.Getenv("BRIDGE_BLOCK_MEDIA") == "true" // superset: images + fonts + CSS + video
+	chromeBinary      = os.Getenv("CHROME_BINARY")                // path to Chrome/Chromium binary
+	chromeExtraFlags  = os.Getenv("CHROME_FLAGS")                 // extra flags (space-separated)
+	noAnimations      = os.Getenv("BRIDGE_NO_ANIMATIONS") == "true"
+	stealthLevel      = envOr("BRIDGE_STEALTH", "light") // "light" or "full"
+	dialogPolicy      = os.Getenv("BRIDGE_DIALOG")       // "" (manual via /dialog), "accept" or "dismiss"
+	downloadDir       = envOr("BRIDGE_DOWNLOAD_DIR", filepath.Join(homeDir(), ".seebro", "downloads"))
+	networkBufferSize = envInt("BRIDGE_NETWORK_BUFFER", 300) // requests kept per tab
+	consoleBufferSize = envInt("BRIDGE_CONSOLE_BUFFER", 200) // console messages kept per tab
+	actionTimeout     = 15 * time.Second
+	navigateTimeout   = 30 * time.Second
+	shutdownTimeout   = 10 * time.Second
+	waitNavDelay      = 1 * time.Second
 )
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
+		return n
 	}
 	return fallback
 }

@@ -174,6 +174,12 @@ func TestActionRegistry_HumanActions(t *testing.T) {
 		actionClick, actionType, actionFill, actionPress,
 		actionFocus, actionHover, actionSelect, actionScroll,
 		actionHumanClick, actionHumanType,
+		actionDblClick, actionClickAt, actionDrag, actionUpload,
+	}
+	for _, k := range expectedActions {
+		if _, ok := registry[k]; !ok {
+			t.Errorf("%s action not registered", k)
+		}
 	}
 
 	if len(registry) != len(expectedActions) {

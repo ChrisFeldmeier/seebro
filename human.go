@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"math/rand"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
@@ -129,35 +126,6 @@ func humanClick(ctx context.Context, x, y float64) error {
 				Do(ctx)
 		}),
 	)
-}
-
-// humanClickElement clicks an element with human-like behavior
-func humanClickElement(ctx context.Context, nodeID cdp.NodeID) error {
-	// Get element center coordinates
-	var box *dom.BoxModel
-	if err := chromedp.Run(ctx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			var err error
-			box, err = dom.GetBoxModel().WithNodeID(nodeID).Do(ctx)
-			return err
-		}),
-	); err != nil {
-		return err
-	}
-
-	if len(box.Content) < 4 {
-		return fmt.Errorf("invalid box model")
-	}
-
-	// Calculate center with slight randomness
-	centerX := (box.Content[0] + box.Content[2]) / 2
-	centerY := (box.Content[1] + box.Content[5]) / 2
-
-	// Add small random offset (humans don't click exact center)
-	offsetX := (rand.Float64() - 0.5) * 10
-	offsetY := (rand.Float64() - 0.5) * 10
-
-	return humanClick(ctx, centerX+offsetX, centerY+offsetY)
 }
 
 // humanType types text with natural timing and occasional corrections

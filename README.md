@@ -64,6 +64,26 @@ BRIDGE_HEADLESS=true ./seebro
 
 If you're using [OpenClaw](https://openclaw.ai), just ask your agent to set up Seebro. The [skill file](skill/seebro/SKILL.md) has everything it needs.
 
+## Use with Claude (MCP)
+
+Seebro includes an MCP server, so Claude Code, Claude Desktop and any other MCP client can drive the browser through 38 tools. These cover tabs, navigation, snapshots, clicks and forms, network and console inspection, dialogs, emulation, PDF, downloads and cookies.
+
+```bash
+# Claude Code — stdio; starts a headless Seebro in the background if none is running
+claude mcp add seebro -- /path/to/seebro mcp
+
+# or connect to an already running server over HTTP
+claude mcp add --transport http seebro http://localhost:9867/mcp --header "Authorization: Bearer $BRIDGE_TOKEN"
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "seebro": { "command": "/path/to/seebro", "args": ["mcp"] } } }
+```
+
+`seebro mcp` is a small proxy (a few MB). It forwards JSON-RPC to `POST /mcp` on the running server, so all clients share one Chrome. The token comes from `BRIDGE_TOKEN` or `~/.seebro/config.json`. The Claude skill in [`skill/seebro`](skill/seebro/SKILL.md) teaches the agent how to work with Seebro, especially how to get data out of web apps. Copy it to `~/.claude/skills/seebro` to install it.
+
 ## Running Modes
 
 ### Headless (Production)
@@ -145,6 +165,26 @@ Log in once, stay logged in. Seebro maintains a Chrome profile at `~/.seebro/chr
 | `POST /fingerprint/rotate` | Change browser fingerprint |
 | `POST /shutdown` | Graceful shutdown |
 
+### DevTools
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /network` | Requests since the last navigation (filter by `type`, `filter`, `method`, `status`) |
+| `GET /network/request` | Headers, POST data and response body of one request (`id`) |
+| `GET /console` | Console messages, uncaught exceptions, browser log |
+| `POST /network/clear`, `POST /console/clear` | Reset the recorded logs of a tab |
+| `GET /dialog`, `POST /dialog` | Inspect / accept / dismiss `alert`, `confirm`, `prompt` |
+| `POST /wait` | Wait for text, selector (or its absence), URL or network idle |
+| `POST /emulate` | Viewport/device, user agent, color scheme, geolocation, network + CPU throttling, headers, timezone, locale |
+| `GET /element` | Attributes, text, box, outerHTML and computed styles of one element |
+| `GET /pdf` | Print page to PDF |
+| `GET /downloads` | Downloaded files (saved to `~/.seebro/downloads`) |
+| `POST /mcp` | MCP endpoint (Streamable HTTP) |
+
+Network and console data live in fixed-size per-tab buffers (300 requests and 200 messages by default). Response bodies are never copied, and Chrome serves them on request, so memory stays flat however long a tab stays open.
+
+`/navigate` also takes `"type": "back" | "forward" | "reload"`. `/screenshot` takes `format=png|webp`, `fullPage=true`, or `ref`/`selector` to capture a single element. `/evaluate` awaits promises, and with `ref`/`selector` it runs `el => …` on that element. Action kinds now include `dblclick`, `clickAt`, `drag` and `upload`. `fill` fires input/change events, and `press` understands key names and combos such as `Enter` or `Control+A`.
+
 ### Snapshot Options
 
 | Parameter | Effect |
@@ -171,6 +211,12 @@ Environment variables control behavior:
 | `BRIDGE_BLOCK_IMAGES` | `false` | Skip image loading |
 | `BRIDGE_NO_ANIMATIONS` | `false` | Freeze CSS animations |
 | `CDP_URL` | – | Connect to existing Chrome instance |
+| `BRIDGE_DOWNLOAD_DIR` | `~/.seebro/downloads` | Where downloads are saved |
+| `BRIDGE_DIALOG` | – | `accept` / `dismiss` to auto-answer JS dialogs (default: leave open for `/dialog`) |
+| `BRIDGE_NETWORK_BUFFER` | `300` | Network requests kept per tab |
+| `BRIDGE_CONSOLE_BUFFER` | `200` | Console messages kept per tab |
+| `SEEBRO_URL` | `http://127.0.0.1:$BRIDGE_PORT` | Server used by `seebro mcp` |
+| `SEEBRO_NO_AUTOSTART` | – | `true` stops `seebro mcp` from launching a server |
 
 Full list in the [configuration docs](docs/ARCHITECTURE.md).
 

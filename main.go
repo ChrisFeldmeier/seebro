@@ -42,6 +42,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	// MCP over stdio (proxies to the HTTP server, starting it if needed)
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		runMCPStdio()
+		os.Exit(0)
+	}
+
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
 		slog.Error("cannot create state dir", "err", err)
 		os.Exit(1)
@@ -227,6 +233,8 @@ func main() {
 	// Register the initial tab
 	initTargetID := chromedp.FromContext(browserCtx).Target.TargetID
 	bridge.tabs[string(initTargetID)] = &TabEntry{ctx: browserCtx}
+	bridge.attachMonitorLocked(browserCtx, string(initTargetID))
+	bridge.setupDownloads()
 	slog.Info("initial tab", "id", string(initTargetID))
 
 	// Navigate initial tab to welcome page in headed mode (after server starts)
@@ -265,6 +273,26 @@ func main() {
 	mux.HandleFunc("POST /cookies", bridge.handleSetCookies)
 	mux.HandleFunc("GET /stealth/status", bridge.handleStealthStatus)
 	mux.HandleFunc("POST /fingerprint/rotate", bridge.handleFingerprintRotate)
+	mux.HandleFunc("GET /network", bridge.handleNetwork)
+	mux.HandleFunc("GET /network/request", bridge.handleNetworkRequest)
+	mux.HandleFunc("POST /network/clear", bridge.handleMonitorClear(true, false))
+	mux.HandleFunc("GET /console", bridge.handleConsole)
+	mux.HandleFunc("POST /console/clear", bridge.handleMonitorClear(false, true))
+	mux.HandleFunc("GET /dialog", bridge.handleGetDialog)
+	mux.HandleFunc("POST /dialog", bridge.handleDialog)
+	mux.HandleFunc("POST /wait", bridge.handleWait)
+	mux.HandleFunc("POST /emulate", bridge.handleEmulate)
+	mux.HandleFunc("GET /pdf", bridge.handlePDF)
+	mux.HandleFunc("GET /element", bridge.handleElement)
+	mux.HandleFunc("GET /downloads", bridge.handleDownloads)
+
+	// MCP endpoint: tools are dispatched in-process against the routes above.
+	mcpSrv := newMCPServer(&bridge, mux)
+	mux.HandleFunc("POST /mcp", mcpSrv.handleHTTP)
+	mux.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", "POST")
+		jsonErr(w, http.StatusMethodNotAllowed, fmt.Errorf("SSE stream not supported; POST JSON-RPC to /mcp"))
+	})
 	mux.HandleFunc("GET /welcome", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(welcomeHTML))
@@ -317,7 +345,11 @@ func main() {
 	go func() {
 		time.Sleep(500 * time.Millisecond) // let ListenAndServe bind
 		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Get(fmt.Sprintf("http://localhost:%s/health", port))
+		req, _ := http.NewRequest("GET", fmt.Sprintf("http://localhost:%s/health", port), nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			slog.Error("startup health check failed",
 				"err", err,

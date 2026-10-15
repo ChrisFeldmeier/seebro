@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
 
@@ -48,6 +51,11 @@ func (b *Bridge) handleTabs(w http.ResponseWriter, r *http.Request) {
 			entry["owner"] = lock.Owner
 			entry["lockedUntil"] = lock.ExpiresAt.Format(time.RFC3339)
 		}
+		if m := b.Monitor(string(t.TargetID)); m != nil {
+			if d := m.Dialog(); d != nil {
+				entry["dialog"] = d
+			}
+		}
 		tabs = append(tabs, entry)
 	}
 	jsonResp(w, 200, map[string]any{"tabs": tabs})
@@ -60,7 +68,7 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	output := r.URL.Query().Get("output")
 	reqNoAnim := r.URL.Query().Get("noAnimations") == "true"
 
-	ctx, _, err := b.TabContext(tabID)
+	ctx, resolvedTabID, err := b.TabContext(tabID)
 	if err != nil {
 		jsonErr(w, 404, err)
 		return
@@ -81,20 +89,69 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 			quality = qn
 		}
 	}
+	format := page.CaptureScreenshotFormatJpeg
+	switch r.URL.Query().Get("format") {
+	case "png":
+		format = page.CaptureScreenshotFormatPng
+	case "webp":
+		format = page.CaptureScreenshotFormatWebp
+	}
+
+	// Optional clip: a single element (ref/selector) or the full scrollable page.
+	var clip *page.Viewport
+	nodeID, err := b.resolveRef(resolvedTabID, r.URL.Query().Get("ref"))
+	if err != nil {
+		jsonErr(w, 400, err)
+		return
+	}
+	if sel := r.URL.Query().Get("selector"); nodeID > 0 || sel != "" {
+		raw, err := callOnTarget(tCtx, nodeID, sel, `function() {
+			this.scrollIntoView({block: "center", inline: "center"});
+			const r = this.getBoundingClientRect();
+			return {x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height};
+		}`)
+		if err != nil {
+			jsonErr(w, 400, fmt.Errorf("element: %w", err))
+			return
+		}
+		clip = &page.Viewport{Scale: 1}
+		if err := json.Unmarshal(raw, clip); err != nil || clip.Width == 0 || clip.Height == 0 {
+			jsonErr(w, 400, fmt.Errorf("element has no visible box"))
+			return
+		}
+		clip.Scale = 1
+	} else if r.URL.Query().Get("fullPage") == "true" {
+		var cssContent *dom.Rect
+		if err := chromedp.Run(tCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			_, _, _, _, _, cssContent, err = page.GetLayoutMetrics().Do(ctx)
+			return err
+		})); err != nil {
+			jsonErr(w, 500, fmt.Errorf("layout metrics: %w", err))
+			return
+		}
+		clip = &page.Viewport{X: 0, Y: 0, Width: cssContent.Width, Height: min(cssContent.Height, 16384), Scale: 1}
+	}
 
 	if err := chromedp.Run(tCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var err error
-			buf, err = page.CaptureScreenshot().
-				WithFormat(page.CaptureScreenshotFormatJpeg).
-				WithQuality(int64(quality)).
-				Do(ctx)
+			p := page.CaptureScreenshot().WithFormat(format)
+			if format != page.CaptureScreenshotFormatPng {
+				p = p.WithQuality(int64(quality))
+			}
+			if clip != nil {
+				p = p.WithClip(clip).WithCaptureBeyondViewport(true)
+			}
+			buf, err = p.Do(ctx)
 			return err
 		}),
 	); err != nil {
 		jsonErr(w, 500, fmt.Errorf("screenshot: %w", err))
 		return
 	}
+	ext := string(format)
+	mime := "image/" + ext
 
 	// Handle file output
 	if output == "file" {
@@ -105,8 +162,15 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		}
 
 		timestamp := time.Now().Format("20060102-150405")
-		filename := fmt.Sprintf("screenshot-%s.jpg", timestamp)
+		filename := fmt.Sprintf("screenshot-%s.%s", timestamp, ext)
 		filePath := filepath.Join(screenshotDir, filename)
+		if p := r.URL.Query().Get("path"); p != "" {
+			filePath = p
+			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+				jsonErr(w, 500, err)
+				return
+			}
+		}
 
 		if err := os.WriteFile(filePath, buf, 0644); err != nil {
 			jsonErr(w, 500, fmt.Errorf("write screenshot: %w", err))
@@ -116,14 +180,14 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 200, map[string]any{
 			"path":      filePath,
 			"size":      len(buf),
-			"format":    "jpeg",
+			"format":    ext,
 			"timestamp": timestamp,
 		})
 		return
 	}
 
 	if r.URL.Query().Get("raw") == "true" {
-		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Type", mime)
 		if _, err := w.Write(buf); err != nil {
 			slog.Error("screenshot write", "err", err)
 		}
@@ -131,7 +195,7 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResp(w, 200, map[string]any{
-		"format": "jpeg",
+		"format": ext,
 		"base64": base64.StdEncoding.EncodeToString(buf),
 	})
 }
@@ -188,6 +252,8 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TabID       string  `json:"tabId"`
 		URL         string  `json:"url"`
+		Type        string  `json:"type"`        // url (default), back, forward, reload
+		IgnoreCache bool    `json:"ignoreCache"` // reload only
 		NewTab      bool    `json:"newTab"`
 		WaitTitle   float64 `json:"waitTitle"`   // seconds to wait for title (default 2, max 30)
 		Timeout     float64 `json:"timeout"`     // per-request navigate timeout in seconds (default: BRIDGE_NAV_TIMEOUT)
@@ -196,6 +262,10 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
+		return
+	}
+	if req.Type != "" && req.Type != "url" {
+		b.handleHistoryNav(w, r, req.TabID, req.Type, req.IgnoreCache)
 		return
 	}
 	if req.URL == "" {
@@ -296,6 +366,8 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TabID      string `json:"tabId"`
 		Expression string `json:"expression"`
+		Ref        string `json:"ref"`      // run expression as function(el) on this element
+		Selector   string `json:"selector"` // same, by CSS selector
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
@@ -306,7 +378,7 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, err := b.TabContext(req.TabID)
+	ctx, resolvedTabID, err := b.TabContext(req.TabID)
 	if err != nil {
 		jsonErr(w, 404, err)
 		return
@@ -316,13 +388,39 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	defer tCancel()
 	go cancelOnClientDone(r.Context(), tCancel)
 
-	var result any
-	if err := chromedp.Run(tCtx, chromedp.Evaluate(req.Expression, &result)); err != nil {
+	if req.Ref != "" || req.Selector != "" {
+		nodeID, err := b.resolveRef(resolvedTabID, req.Ref)
+		if err != nil {
+			jsonErr(w, 400, err)
+			return
+		}
+		// Arrow functions don't bind `this`, so pass the element as the first argument too.
+		fn := "function() { return (" + req.Expression + ")(this); }"
+		raw, err := callOnTarget(tCtx, nodeID, req.Selector, fn)
+		if err != nil {
+			jsonErr(w, 500, fmt.Errorf("evaluate: %w", err))
+			return
+		}
+		jsonResp(w, 200, map[string]any{"result": raw})
+		return
+	}
+
+	out, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) {
+		var result any
+		err := chromedp.Run(tCtx, chromedp.Evaluate(req.Expression, &result, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithAwaitPromise(true)
+		}))
+		if errors.Is(err, chromedp.ErrJSUndefined) || errors.Is(err, chromedp.ErrJSNull) {
+			err = nil
+		}
+		return map[string]any{"result": result}, err
+	})
+	if err != nil {
 		jsonErr(w, 500, fmt.Errorf("evaluate: %w", err))
 		return
 	}
 
-	jsonResp(w, 200, map[string]any{"result": result})
+	jsonResp(w, 200, out)
 }
 
 // ── POST /tab ──────────────────────────────────────────────
@@ -362,8 +460,20 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonResp(w, 200, map[string]any{"closed": true})
 
+	case tabActionFocus:
+		ctx, id, err := b.TabContext(req.TabID)
+		if err != nil {
+			jsonErr(w, 404, err)
+			return
+		}
+		if err := chromedp.Run(ctx, page.BringToFront()); err != nil {
+			jsonErr(w, 500, err)
+			return
+		}
+		jsonResp(w, 200, map[string]any{"focused": id})
+
 	default:
-		jsonErr(w, 400, fmt.Errorf("action must be 'new' or 'close'"))
+		jsonErr(w, 400, fmt.Errorf("action must be 'new', 'close' or 'focus'"))
 	}
 }
 
@@ -443,3 +553,47 @@ func (b *Bridge) handleShutdown(shutdownFn func()) func(http.ResponseWriter, *ht
 
 // Shared helpers (jsonResp, jsonErr, cancelOnClientDone, waitForTitle)
 // are defined in middleware.go and cdp.go respectively.
+
+// handleHistoryNav implements back / forward / reload for /navigate.
+func (b *Bridge) handleHistoryNav(w http.ResponseWriter, r *http.Request, tabID, kind string, ignoreCache bool) {
+	ctx, resolvedTabID, err := b.TabContext(tabID)
+	if err != nil {
+		jsonErr(w, 404, err)
+		return
+	}
+	tCtx, tCancel := context.WithTimeout(ctx, navigateTimeout)
+	defer tCancel()
+	go cancelOnClientDone(r.Context(), tCancel)
+
+	err = chromedp.Run(tCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		switch kind {
+		case "reload":
+			return page.Reload().WithIgnoreCache(ignoreCache).Do(ctx)
+		case "back", "forward":
+			cur, entries, err := page.GetNavigationHistory().Do(ctx)
+			if err != nil {
+				return err
+			}
+			idx := cur - 1
+			if kind == "forward" {
+				idx = cur + 1
+			}
+			if idx < 0 || idx >= int64(len(entries)) {
+				return fmt.Errorf("no %s history entry", kind)
+			}
+			return page.NavigateToHistoryEntry(entries[idx].ID).Do(ctx)
+		}
+		return fmt.Errorf("type must be url, back, forward or reload")
+	}))
+	if err != nil {
+		jsonErr(w, 400, fmt.Errorf("navigate %s: %w", kind, err))
+		return
+	}
+	time.Sleep(150 * time.Millisecond) // let the new document replace the old one
+	waitReady(tCtx)
+	b.DeleteRefCache(resolvedTabID)
+
+	var url string
+	_ = chromedp.Run(tCtx, chromedp.Location(&url))
+	jsonResp(w, 200, map[string]any{"url": url, "title": waitForTitle(tCtx, 0)})
+}

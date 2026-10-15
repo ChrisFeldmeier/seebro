@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### MCP server
+- `seebro mcp` — stdio MCP server for Claude Code / Claude Desktop; proxies to the running server and starts it headless if needed
+- `POST /mcp` — Streamable HTTP MCP endpoint on the normal port (same auth)
+- 38 tools covering the whole HTTP API (shutdown excluded); screenshots are returned as images, open JS dialogs are reported on every call
+- Claude skill in `skill/seebro` (workflows for reading, forms, logins and data extraction from web apps) plus HTTP reference
+
+### DevTools features
+- Network log per tab: `/network`, `/network/request` (headers, POST data, response body on demand), `/network/clear`
+- Console log per tab (console API, uncaught exceptions, browser log): `/console`, `/console/clear`
+- JS dialogs: `/dialog` (inspect, accept, dismiss, prompt text); actions and evaluate return immediately when a dialog blocks the page; `BRIDGE_DIALOG` auto policy
+- `/wait` for text, selector (or absence), URL, network idle
+- `/emulate`: viewport/device, user agent, color scheme, reduced motion, geolocation, network and CPU throttling, extra headers, timezone, locale
+- `/element`, `/pdf`, `/downloads`; `/navigate` back/forward/reload; `/tab` focus
+- Screenshots: PNG/WebP, full page, single element
+- `/evaluate` awaits promises and can run a function on a ref/selector
+- New actions: `dblclick`, `clickAt`, `drag` (HTML5 + mouse), `upload`
+
+### Fixes
+- `fill` works with refs and fires input/change events (React/Vue forms no longer submit empty values)
+- `press` understands key names and combos (`Enter`, `ArrowDown`, `Control+A`) instead of typing them as text
+- Selector-based actions no longer hang on pages restored from the back/forward cache
+- `humanClick` / `humanType` with refs used the wrong node ID type
+- Startup health check sends the auth token
+
 ## v1.0.0
 
 ### Core Features

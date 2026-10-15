@@ -153,6 +153,7 @@ func (b *Bridge) RestoreState() {
 		newID := string(chromedp.FromContext(ctx).Target.TargetID)
 		b.mu.Lock()
 		b.tabs[newID] = &TabEntry{ctx: ctx, cancel: cancel}
+		b.attachMonitorLocked(ctx, newID)
 		b.mu.Unlock()
 		restored++
 

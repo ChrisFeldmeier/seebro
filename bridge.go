@@ -37,6 +37,7 @@ type Bridge struct {
 	stealthScript string                // injected on every new tab
 	actions       map[string]ActionFunc // cached action registry (built once)
 	locks         *lockManager
+	monitors      map[string]*tabMonitor // network/console/dialog recorders per tab
 	mu            sync.RWMutex
 }
 
@@ -106,6 +107,7 @@ func (b *Bridge) TabContext(tabID string) (context.Context, string, error) {
 	}
 
 	b.tabs[tabID] = &TabEntry{ctx: ctx, cancel: cancel}
+	b.attachMonitorLocked(ctx, tabID)
 	return ctx, tabID, nil
 }
 
@@ -140,6 +142,7 @@ func (b *Bridge) CleanStaleTabs(ctx context.Context, interval time.Duration) {
 				}
 				delete(b.tabs, id)
 				delete(b.snapshots, id)
+				delete(b.monitors, id)
 				slog.Info("cleaned stale tab", "id", id)
 			}
 		}
@@ -174,9 +177,14 @@ func (b *Bridge) CreateTab(url string) (string, context.Context, context.CancelF
 		return "", nil, nil, fmt.Errorf("no browser context available")
 	}
 	ctx, cancel := chromedp.NewContext(b.browserCtx)
+	mon := b.attachMonitor(ctx, "")
 
 	// Inject stealth script before navigation so it applies to the first page load
 	b.injectStealth(ctx)
+	if c := chromedp.FromContext(ctx); c != nil && c.Target != nil {
+		b.storeMonitor(string(c.Target.TargetID), mon)
+	}
+	tuneNetworkBuffers(ctx)
 
 	if noAnimations {
 		b.injectNoAnimations(ctx)
@@ -235,6 +243,7 @@ func (b *Bridge) CloseTab(tabID string) error {
 	b.mu.Lock()
 	delete(b.tabs, tabID)
 	delete(b.snapshots, tabID)
+	delete(b.monitors, tabID)
 	b.mu.Unlock()
 
 	return nil

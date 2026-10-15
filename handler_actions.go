@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom"
+	"math/rand"
+
 	"github.com/chromedp/chromedp"
 )
 
@@ -29,6 +29,14 @@ type actionRequest struct {
 	ScrollY  int    `json:"scrollY"`
 	WaitNav  bool   `json:"waitNav"`
 	Fast     bool   `json:"fast"`
+
+	X          float64  `json:"x"` // clickAt / drag target
+	Y          float64  `json:"y"`
+	Count      int      `json:"count"`      // clickAt click count
+	ToRef      string   `json:"toRef"`      // drag target
+	ToSelector string   `json:"toSelector"` // drag target
+	ToNodeID   int64    `json:"toNodeId"`
+	Files      []string `json:"files"` // upload
 }
 
 // ActionFunc handles a single action kind.
@@ -41,7 +49,7 @@ func (b *Bridge) initActionRegistry() {
 		actionClick: func(ctx context.Context, req actionRequest) (map[string]any, error) {
 			var err error
 			if req.Selector != "" {
-				err = chromedp.Run(ctx, chromedp.Click(req.Selector, chromedp.ByQuery))
+				_, err = callOnTarget(ctx, 0, req.Selector, clickJS)
 			} else if req.NodeID > 0 {
 				err = clickByNodeID(ctx, req.NodeID)
 			} else {
@@ -60,31 +68,22 @@ func (b *Bridge) initActionRegistry() {
 				return nil, fmt.Errorf("text required for type")
 			}
 			if req.Selector != "" {
-				return map[string]any{"typed": req.Text}, chromedp.Run(ctx,
-					chromedp.Click(req.Selector, chromedp.ByQuery),
-					chromedp.SendKeys(req.Selector, req.Text, chromedp.ByQuery),
-				)
+				if _, err := callOnTarget(ctx, 0, req.Selector, focusJS); err != nil {
+					return nil, err
+				}
+				return map[string]any{"typed": req.Text}, chromedp.Run(ctx, chromedp.KeyEvent(req.Text))
 			}
 			if req.NodeID > 0 {
 				return map[string]any{"typed": req.Text}, typeByNodeID(ctx, req.NodeID, req.Text)
 			}
 			return nil, fmt.Errorf("need selector or ref")
 		},
-		actionFill: func(ctx context.Context, req actionRequest) (map[string]any, error) {
-			if req.Selector != "" {
-				return map[string]any{"filled": req.Text}, chromedp.Run(ctx, chromedp.SetValue(req.Selector, req.Text, chromedp.ByQuery))
-			}
-			return map[string]any{"filled": req.Text}, nil
-		},
-		actionPress: func(ctx context.Context, req actionRequest) (map[string]any, error) {
-			if req.Key == "" {
-				return nil, fmt.Errorf("key required for press")
-			}
-			return map[string]any{"pressed": req.Key}, chromedp.Run(ctx, chromedp.KeyEvent(req.Key))
-		},
+		actionFill:  fillAction,
+		actionPress: pressAction,
 		actionFocus: func(ctx context.Context, req actionRequest) (map[string]any, error) {
 			if req.Selector != "" {
-				return map[string]any{"focused": true}, chromedp.Run(ctx, chromedp.Focus(req.Selector, chromedp.ByQuery))
+				_, err := callOnTarget(ctx, 0, req.Selector, focusJS)
+				return map[string]any{"focused": true}, err
 			}
 			if req.NodeID > 0 {
 				return map[string]any{"focused": true}, chromedp.Run(ctx,
@@ -119,9 +118,8 @@ func (b *Bridge) initActionRegistry() {
 				return map[string]any{"selected": val}, selectByNodeID(ctx, req.NodeID, val)
 			}
 			if req.Selector != "" {
-				return map[string]any{"selected": val}, chromedp.Run(ctx,
-					chromedp.SetValue(req.Selector, val, chromedp.ByQuery),
-				)
+				_, err := callOnTarget(ctx, 0, req.Selector, selectJS, val)
+				return map[string]any{"selected": val}, err
 			}
 			return nil, fmt.Errorf("need selector or ref")
 		},
@@ -138,48 +136,31 @@ func (b *Bridge) initActionRegistry() {
 				chromedp.Run(ctx, chromedp.Evaluate("window.scrollBy(0, 800)", nil))
 		},
 		actionHumanClick: func(ctx context.Context, req actionRequest) (map[string]any, error) {
-			if req.NodeID > 0 {
-				if err := humanClickElement(ctx, cdp.NodeID(req.NodeID)); err != nil {
-					return nil, err
-				}
-				return map[string]any{"clicked": true, "human": true}, nil
+			if req.NodeID == 0 && req.Selector == "" {
+				return nil, fmt.Errorf("need selector, ref, or nodeId")
 			}
-			if req.Selector != "" {
-				var nodes []*cdp.Node
-				if err := chromedp.Run(ctx,
-					chromedp.Nodes(req.Selector, &nodes, chromedp.ByQuery),
-				); err != nil {
-					return nil, err
-				}
-				if len(nodes) == 0 {
-					return nil, fmt.Errorf("element not found: %s", req.Selector)
-				}
-				if err := humanClickElement(ctx, nodes[0].NodeID); err != nil {
-					return nil, err
-				}
-				return map[string]any{"clicked": true, "human": true}, nil
+			x, y, err := elementCenter(ctx, req.NodeID, req.Selector)
+			if err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("need selector, ref, or nodeId")
+			// Humans don't hit the exact center.
+			x += (rand.Float64() - 0.5) * 6
+			y += (rand.Float64() - 0.5) * 6
+			if err := humanClick(ctx, x, y); err != nil {
+				return nil, err
+			}
+			return map[string]any{"clicked": true, "human": true}, nil
 		},
 		actionHumanType: func(ctx context.Context, req actionRequest) (map[string]any, error) {
 			if req.Text == "" {
 				return nil, fmt.Errorf("text required for humanType")
 			}
 
-			if req.Selector != "" {
-				if err := chromedp.Run(ctx, chromedp.Focus(req.Selector, chromedp.ByQuery)); err != nil {
-					return nil, err
-				}
-			} else if req.NodeID > 0 {
-				if err := chromedp.Run(ctx,
-					chromedp.ActionFunc(func(ctx context.Context) error {
-						return dom.Focus().WithNodeID(cdp.NodeID(req.NodeID)).Do(ctx)
-					}),
-				); err != nil {
-					return nil, err
-				}
-			} else {
+			if req.NodeID == 0 && req.Selector == "" {
 				return nil, fmt.Errorf("need selector, ref, or nodeId")
+			}
+			if _, err := callOnTarget(ctx, req.NodeID, req.Selector, focusJS); err != nil {
+				return nil, err
 			}
 
 			actions := humanType(req.Text, req.Fast)
@@ -190,6 +171,17 @@ func (b *Bridge) initActionRegistry() {
 			return map[string]any{"typed": req.Text, "human": true}, nil
 		},
 	}
+	b.registerExtraActions()
+}
+
+// resolveToRef maps the drag target ref to a backend node ID.
+func (b *Bridge) resolveToRef(tabID string, req *actionRequest) error {
+	if req.ToRef == "" || req.ToNodeID != 0 || req.ToSelector != "" {
+		return nil
+	}
+	nid, err := b.resolveRef(tabID, req.ToRef)
+	req.ToNodeID = nid
+	return err
 }
 
 func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +217,11 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := b.resolveToRef(resolvedTabID, &req); err != nil {
+		jsonResp(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+
 	registry := b.actions
 	if req.Kind == "" {
 		kinds := make([]string, 0, len(registry))
@@ -248,7 +245,7 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := fn(tCtx, req)
+	result, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(tCtx, req) })
 	if err != nil {
 		jsonErr(w, 500, fmt.Errorf("action %s: %w", req.Kind, err))
 		return
@@ -333,6 +330,15 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if err := b.resolveToRef(resolvedTabID, &action); err != nil {
+			tCancel()
+			results = append(results, actionResult{Index: i, Success: false, Error: err.Error()})
+			if req.StopOnError {
+				break
+			}
+			continue
+		}
+
 		if action.Kind == "" {
 			tCancel()
 			results = append(results, actionResult{
@@ -361,7 +367,7 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		actionRes, err := fn(tCtx, action)
+		actionRes, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(tCtx, action) })
 		tCancel()
 
 		if err != nil {

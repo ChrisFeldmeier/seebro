@@ -31,6 +31,18 @@ func navigatePage(ctx context.Context, url string) error {
 		}),
 		// Poll document.readyState until interactive/complete or context deadline.
 		chromedp.ActionFunc(func(ctx context.Context) error {
+			waitReady(ctx)
+			return nil
+		}),
+	)
+}
+
+// waitReady polls document.readyState until interactive/complete or the
+// context deadline (10s if none). Timing out is not an error: the page may
+// still be usable.
+func waitReady(ctx context.Context) {
+	_ = chromedp.Run(ctx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
 			// Use context deadline if set, otherwise fall back to 10s.
 			deadline, ok := ctx.Deadline()
 			if !ok {
@@ -125,9 +137,25 @@ func withElementArg(ctx context.Context, backendNodeID int64, jsFunc string, arg
 	)
 }
 
+// Element functions shared by ref- and selector-based actions. Selectors are
+// resolved through Runtime.evaluate rather than chromedp's DOM queries, which
+// hang on pages restored from the back/forward cache.
+const (
+	clickJS  = "function() { this.scrollIntoViewIfNeeded(); this.click(); }"
+	focusJS  = "function() { this.scrollIntoViewIfNeeded(); this.focus(); }"
+	selectJS = `function(val) {
+		this.scrollIntoViewIfNeeded();
+		const opt = Array.from(this.options).find(o => o.value === val || o.textContent.trim() === val);
+		if (opt) { this.value = opt.value; }
+		else { this.value = val; }
+		this.dispatchEvent(new Event('input', {bubbles: true}));
+		this.dispatchEvent(new Event('change', {bubbles: true}));
+	}`
+)
+
 // clickByNodeID scrolls an element into view and clicks it.
 func clickByNodeID(ctx context.Context, backendNodeID int64) error {
-	return withElement(ctx, backendNodeID, "function() { this.scrollIntoViewIfNeeded(); this.click(); }")
+	return withElement(ctx, backendNodeID, clickJS)
 }
 
 // typeByNodeID scrolls an element into view, focuses it, and sends keyboard events.
@@ -158,13 +186,7 @@ func hoverByNodeID(ctx context.Context, backendNodeID int64) error {
 
 // selectByNodeID sets the value of a <select> element and fires change event.
 func selectByNodeID(ctx context.Context, backendNodeID int64, value string) error {
-	return withElementArg(ctx, backendNodeID, `function(val) {
-		this.scrollIntoViewIfNeeded();
-		const opt = Array.from(this.options).find(o => o.value === val || o.textContent.trim() === val);
-		if (opt) { this.value = opt.value; }
-		else { this.value = val; }
-		this.dispatchEvent(new Event('change', {bubbles: true}));
-	}`, value)
+	return withElementArg(ctx, backendNodeID, selectJS, value)
 }
 
 // scrollByNodeID scrolls an element into view.

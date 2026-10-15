@@ -1,6 +1,6 @@
 node_modules/
-browser-bridge
-seebro
+/browser-bridge
+/seebro
 coverage.out
 
 # OpenClaw workspace files (should never be committed)
