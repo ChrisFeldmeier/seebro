@@ -3,20 +3,28 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 // A11yNode is a flattened accessibility tree node returned by /snapshot.
 // Refs (e0, e1, ...) are stable within a snapshot and cached for use by /action.
 type A11yNode struct {
-	Ref      string `json:"ref"`
-	Role     string `json:"role"`
-	Name     string `json:"name"`
-	Depth    int    `json:"depth"`
-	Value    string `json:"value,omitempty"`
-	Disabled bool   `json:"disabled,omitempty"`
-	Focused  bool   `json:"focused,omitempty"`
-	NodeID   int64  `json:"nodeId,omitempty"`
+	Ref       string   `json:"ref"`
+	Role      string   `json:"role"`
+	Name      string   `json:"name"`
+	Depth     int      `json:"depth"`
+	Value     string   `json:"value,omitempty"`
+	Disabled  bool     `json:"disabled,omitempty"`
+	Focused   bool     `json:"focused,omitempty"`
+	Checked   bool     `json:"checked,omitempty"`
+	Expanded  bool     `json:"expanded,omitempty"`
+	Collapsed bool     `json:"collapsed,omitempty"`
+	Required  bool     `json:"required,omitempty"`
+	Options   []string `json:"options,omitempty"`
+	Href      string   `json:"href,omitempty"`
+	Frame     string   `json:"frame,omitempty"` // child frame ("f1 https://…"); empty for the main frame
+	NodeID    int64    `json:"nodeId,omitempty"`
 }
 
 // Raw a11y tree types — we parse CDP responses manually because the typed
@@ -115,7 +123,7 @@ func buildSnapshot(nodes []rawAXNode, filter string, maxDepth int) ([]A11yNode, 
 			continue
 		}
 
-		ref := fmt.Sprintf("e%d", refID)
+		ref := "a" + strconv.Itoa(refID) // "a" = accessibility tree; "e" refs come from the engine
 		entry := A11yNode{
 			Ref:   ref,
 			Role:  role,
@@ -147,11 +155,65 @@ func buildSnapshot(nodes []rawAXNode, filter string, maxDepth int) ([]A11yNode, 
 	return flat, refs
 }
 
+// nodeFlags renders state markers shared by the text formats.
+func nodeFlags(b *strings.Builder, n A11yNode, compact bool) {
+	if len(n.Options) > 0 {
+		b.WriteString(` opts=[`)
+		b.WriteString(strings.Join(n.Options, "|"))
+		b.WriteByte(']')
+	}
+	if n.Checked {
+		b.WriteString(" checked")
+	}
+	if n.Expanded {
+		b.WriteString(" expanded")
+	}
+	if n.Collapsed {
+		b.WriteString(" collapsed")
+	}
+	if n.Required {
+		b.WriteString(" required")
+	}
+	if compact {
+		if n.Focused {
+			b.WriteString(" *")
+		}
+		if n.Disabled {
+			b.WriteString(" -")
+		}
+	} else {
+		if n.Focused {
+			b.WriteString(" [focused]")
+		}
+		if n.Disabled {
+			b.WriteString(" [disabled]")
+		}
+	}
+	if n.Href != "" {
+		b.WriteString(" -> ")
+		b.WriteString(n.Href)
+	}
+}
+
+// frameHeader prints a "# frame …" line whenever the frame changes.
+func frameHeader(b *strings.Builder, n A11yNode, last *string) {
+	if n.Frame != *last {
+		*last = n.Frame
+		if n.Frame != "" {
+			b.WriteString("# frame ")
+			b.WriteString(n.Frame)
+			b.WriteByte('\n')
+		}
+	}
+}
+
 // formatSnapshotText renders nodes as an indented text tree.
 // Much cheaper on tokens than JSON (~40-60% reduction).
 func formatSnapshotText(nodes []A11yNode) string {
 	var b strings.Builder
+	frame := ""
 	for _, n := range nodes {
+		frameHeader(&b, n, &frame)
 		for i := 0; i < n.Depth; i++ {
 			b.WriteString("  ")
 		}
@@ -168,12 +230,7 @@ func formatSnapshotText(nodes []A11yNode) string {
 			b.WriteString(n.Value)
 			b.WriteByte('"')
 		}
-		if n.Focused {
-			b.WriteString(" [focused]")
-		}
-		if n.Disabled {
-			b.WriteString(" [disabled]")
-		}
+		nodeFlags(&b, n, false)
 		b.WriteByte('\n')
 	}
 	return b.String()
@@ -183,7 +240,9 @@ func formatSnapshotText(nodes []A11yNode) string {
 // ~60-70% fewer tokens than JSON. Format: ref:role "name" [val="v"] [flags]
 func formatSnapshotCompact(nodes []A11yNode) string {
 	var b strings.Builder
+	frame := ""
 	for _, n := range nodes {
+		frameHeader(&b, n, &frame)
 		b.WriteString(n.Ref)
 		b.WriteByte(':')
 		b.WriteString(n.Role)
@@ -197,12 +256,7 @@ func formatSnapshotCompact(nodes []A11yNode) string {
 			b.WriteString(n.Value)
 			b.WriteByte('"')
 		}
-		if n.Focused {
-			b.WriteString(" *")
-		}
-		if n.Disabled {
-			b.WriteString(" -")
-		}
+		nodeFlags(&b, n, true)
 		b.WriteByte('\n')
 	}
 	return b.String()
@@ -284,31 +338,45 @@ func filterSubtree(nodes []rawAXNode, scopeBackendID int64) []rawAXNode {
 	return result
 }
 
+// diffKey identifies a node across snapshots. Engine refs are stable per
+// element, so they are the key; accessibility-tree refs are positional, so
+// those nodes are keyed by role, name and DOM node.
+func diffKey(n A11yNode) string {
+	if n.NodeID == 0 {
+		return n.Ref
+	}
+	return fmt.Sprintf("%s:%s:%d", n.Role, n.Name, n.NodeID)
+}
+
+func nodeChanged(a, b A11yNode) bool {
+	return a.Name != b.Name || a.Value != b.Value || a.Focused != b.Focused || a.Disabled != b.Disabled ||
+		a.Checked != b.Checked || a.Expanded != b.Expanded || a.Collapsed != b.Collapsed ||
+		strings.Join(a.Options, "|") != strings.Join(b.Options, "|")
+}
+
 // diffSnapshot returns only nodes that changed between prev and current snapshots.
-// A node is "changed" if it's new, removed, or has different name/value/focused/disabled.
+// A node is "changed" if it's new, removed, or has different name/value/state.
 // Returns added, changed, and removed nodes.
 func diffSnapshot(prev, curr []A11yNode) (added, changed, removed []A11yNode) {
 	prevMap := make(map[string]A11yNode, len(prev))
 	for _, n := range prev {
-		key := fmt.Sprintf("%s:%s:%d", n.Role, n.Name, n.NodeID)
-		prevMap[key] = n
+		prevMap[diffKey(n)] = n
 	}
 
 	currMap := make(map[string]bool, len(curr))
 	for _, n := range curr {
-		key := fmt.Sprintf("%s:%s:%d", n.Role, n.Name, n.NodeID)
+		key := diffKey(n)
 		currMap[key] = true
 		old, existed := prevMap[key]
 		if !existed {
 			added = append(added, n)
-		} else if old.Value != n.Value || old.Focused != n.Focused || old.Disabled != n.Disabled {
+		} else if nodeChanged(old, n) {
 			changed = append(changed, n)
 		}
 	}
 
 	for _, n := range prev {
-		key := fmt.Sprintf("%s:%s:%d", n.Role, n.Name, n.NodeID)
-		if !currMap[key] {
+		if !currMap[diffKey(n)] {
 			removed = append(removed, n)
 		}
 	}

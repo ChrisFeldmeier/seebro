@@ -123,6 +123,14 @@ func main() {
 			// Window size (UA left as Chrome default to avoid detection mismatches)
 			chromedp.WindowSize(1366, 768),
 		}
+		if !siteIsolation {
+			// Keep cross-origin iframes in the page's process so snapshots,
+			// text and actions reach into them (and fewer processes run).
+			chromeOpts = append(chromeOpts,
+				chromedp.Flag("disable-site-isolation-trials", true),
+				chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
+			)
+		}
 
 		if chromeBinary != "" {
 			chromeOpts = append(chromeOpts, chromedp.ExecPath(chromeBinary))

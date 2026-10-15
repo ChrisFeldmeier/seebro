@@ -71,6 +71,7 @@ var (
 	noAnimations      = os.Getenv("BRIDGE_NO_ANIMATIONS") == "true"
 	stealthLevel      = envOr("BRIDGE_STEALTH", "light") // "light" or "full"
 	dialogPolicy      = os.Getenv("BRIDGE_DIALOG")       // "" (manual via /dialog), "accept" or "dismiss"
+	siteIsolation     = os.Getenv("BRIDGE_SITE_ISOLATION") == "true"
 	downloadDir       = envOr("BRIDGE_DOWNLOAD_DIR", filepath.Join(homeDir(), ".seebro", "downloads"))
 	networkBufferSize = envInt("BRIDGE_NETWORK_BUFFER", 300) // requests kept per tab
 	consoleBufferSize = envInt("BRIDGE_CONSOLE_BUFFER", 200) // console messages kept per tab

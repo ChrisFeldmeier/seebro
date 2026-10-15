@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chromedp/cdproto/page"
@@ -96,9 +98,13 @@ func (b *Bridge) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		format = page.CaptureScreenshotFormatWebp
 	}
 
-	nodeID, err := b.resolveRef(resolvedTabID, r.URL.Query().Get("ref"))
+	nodeID, frameID, err := b.resolveRef(tCtx, resolvedTabID, r.URL.Query().Get("ref"))
 	if err != nil {
 		jsonErr(w, 400, err)
+		return
+	}
+	if frameID != "" && frameID != resolvedTabID {
+		jsonErr(w, 400, fmt.Errorf("element screenshots inside iframes are not supported; screenshot the iframe element instead"))
 		return
 	}
 	opts := shotOptions{
@@ -193,7 +199,7 @@ func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, err := b.TabContext(q.Get("tabId"))
+	ctx, tabID, err := b.TabContext(q.Get("tabId"))
 	if err != nil {
 		jsonErr(w, 404, err)
 		return
@@ -212,6 +218,9 @@ func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
 	if err := chromedp.Run(tCtx, chromedp.Evaluate("("+textJS+")("+string(opts)+")", &res)); err != nil {
 		jsonErr(w, 500, fmt.Errorf("text extract: %w", err))
 		return
+	}
+	if mode != "raw" {
+		res.Text += b.crossOriginFrameText(tCtx, tabID, res.URL, string(opts))
 	}
 
 	out := map[string]any{"url": res.URL, "title": res.Title}
@@ -393,7 +402,7 @@ func (b *Bridge) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	go cancelOnClientDone(r.Context(), tCancel)
 
 	if req.Ref != "" || req.Selector != "" {
-		nodeID, err := b.resolveRef(resolvedTabID, req.Ref)
+		nodeID, _, err := b.resolveRef(tCtx, resolvedTabID, req.Ref)
 		if err != nil {
 			jsonErr(w, 400, err)
 			return
@@ -623,4 +632,38 @@ func (b *Bridge) waitLoad(ctx context.Context, tabID, until string) {
 	for m != nil && ctx.Err() == nil && !m.NetworkIdle(2, 500*time.Millisecond) {
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// crossOriginFrameText appends the text of cross-origin iframes, which the
+// page's own JavaScript cannot read (same-origin frames are inlined by text.js).
+func (b *Bridge) crossOriginFrameText(ctx context.Context, tabID, mainURL, opts string) string {
+	main, err := neturl.Parse(mainURL)
+	if err != nil {
+		return ""
+	}
+	frames := b.frames(ctx, tabID)
+	if len(frames) < 2 {
+		return ""
+	}
+	fr := b.frameRefsFor(tabID)
+	var sb strings.Builder
+	for _, f := range frames[1:] {
+		u, err := neturl.Parse(f.url)
+		if err != nil || u.Scheme == "about" || u.Scheme == "data" || (u.Scheme == main.Scheme && u.Host == main.Host) {
+			continue
+		}
+		wid, err := b.world(ctx, fr, f.id, true)
+		if err != nil {
+			continue
+		}
+		var res struct {
+			Text string `json:"text"`
+		}
+		if err := callWorld(ctx, wid, "("+textJS+")("+opts+")", &res); err != nil || strings.TrimSpace(res.Text) == "" {
+			continue
+		}
+		sb.WriteString("\n\n[iframe " + f.url + "]\n")
+		sb.WriteString(res.Text)
+	}
+	return sb.String()
 }

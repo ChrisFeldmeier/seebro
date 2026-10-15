@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -54,84 +55,35 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		disableAnimationsOnce(tCtx)
 	}
 
-	var rawResult json.RawMessage
-	if err := chromedp.Run(tCtx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return chromedp.FromContext(ctx).Target.Execute(ctx,
-				"Accessibility.getFullAXTree", nil, &rawResult)
-		}),
-	); err != nil {
-		jsonErr(w, 500, fmt.Errorf("a11y tree: %w", err))
-		return
-	}
+	var flat []A11yNode
+	var refs map[string]int64
+	var url, title string
+	hiddenOutside := 0
 
-	var treeResp struct {
-		Nodes []rawAXNode `json:"nodes"`
-	}
-	if err := json.Unmarshal(rawResult, &treeResp); err != nil {
-		jsonErr(w, 500, fmt.Errorf("parse a11y tree: %w", err))
-		return
-	}
-
-	// If a CSS selector is specified, scope the tree to that element's subtree.
-	if selector != "" {
-		var scopeNodeID int64
-		if err := chromedp.Run(tCtx,
-			chromedp.ActionFunc(func(ctx context.Context) error {
-				// Use DOM.querySelector to find the element
-				p := map[string]any{"nodeId": 0, "selector": selector}
-				// First get the document node
-				var docResult json.RawMessage
-				if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.getDocument", map[string]any{"depth": 0}, &docResult); err != nil {
-					return fmt.Errorf("get document: %w", err)
-				}
-				var doc struct {
-					Root struct {
-						NodeID int64 `json:"nodeId"`
-					} `json:"root"`
-				}
-				if err := json.Unmarshal(docResult, &doc); err != nil {
-					return err
-				}
-				p["nodeId"] = doc.Root.NodeID
-				var qResult json.RawMessage
-				if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.querySelector", p, &qResult); err != nil {
-					return fmt.Errorf("querySelector: %w", err)
-				}
-				var qr struct {
-					NodeID int64 `json:"nodeId"`
-				}
-				if err := json.Unmarshal(qResult, &qr); err != nil {
-					return err
-				}
-				if qr.NodeID == 0 {
-					return fmt.Errorf("selector %q not found", selector)
-				}
-				// Resolve DOM nodeId to backendNodeId
-				var descResult json.RawMessage
-				if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.describeNode", map[string]any{"nodeId": qr.NodeID}, &descResult); err != nil {
-					return fmt.Errorf("describe node: %w", err)
-				}
-				var desc struct {
-					Node struct {
-						BackendNodeID int64 `json:"backendNodeId"`
-					} `json:"node"`
-				}
-				if err := json.Unmarshal(descResult, &desc); err != nil {
-					return err
-				}
-				scopeNodeID = desc.Node.BackendNodeID
-				return nil
-			}),
-		); err != nil {
-			jsonErr(w, 400, fmt.Errorf("selector: %w", err))
+	// Interactive snapshots come from the in-page engine (fast, stable refs,
+	// iframes, viewport filter); everything else from the accessibility tree.
+	if filter == filterInteractive && r.URL.Query().Get("engine") != "ax" {
+		flat, url, title, hiddenOutside, err = b.jsSnapshot(tCtx, resolvedTabID, jsSnapshotOptions{
+			Viewport: r.URL.Query().Get("viewport") == "true",
+			Links:    r.URL.Query().Get("links") == "true",
+			Selector: selector,
+			MaxNodes: queryInt(r, "maxNodes", 0),
+		})
+		if err != nil {
+			jsonErr(w, 500, fmt.Errorf("snapshot: %w", err))
 			return
 		}
-
-		treeResp.Nodes = filterSubtree(treeResp.Nodes, scopeNodeID)
+	} else {
+		flat, refs, url, title, err = b.axSnapshot(tCtx, filter, selector, maxDepth)
+		if err != nil {
+			code := 500
+			if strings.HasPrefix(err.Error(), "selector") {
+				code = 400
+			}
+			jsonErr(w, code, err)
+			return
+		}
 	}
-
-	flat, refs := buildSnapshot(treeResp.Nodes, filter, maxDepth)
 
 	// Truncate to maxTokens if specified (rough: 1 token ≈ 4 bytes)
 	truncated := false
@@ -147,14 +99,14 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Cache ref→nodeID mapping and nodes for this tab
+	// Cache accessibility-tree refs (engine refs live in the page) and the
+	// nodes for the next diff.
+	if refs == nil {
+		if prev := b.GetRefCache(resolvedTabID); prev != nil {
+			refs = prev.refs
+		}
+	}
 	b.SetRefCache(resolvedTabID, &refCache{refs: refs, nodes: flat})
-
-	var url, title string
-	_ = chromedp.Run(tCtx,
-		chromedp.Location(&url),
-		chromedp.Title(&title),
-	)
 
 	// Handle file output
 	if output == "file" {
@@ -290,6 +242,9 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(200)
 		_, _ = fmt.Fprintf(w, "# %s | %s | %d nodes", title, url, len(flat))
+		if hiddenOutside > 0 {
+			_, _ = fmt.Fprintf(w, " (+%d outside the viewport)", hiddenOutside)
+		}
 		if truncated {
 			_, _ = fmt.Fprintf(w, " (truncated to ~%d tokens)", maxTokens)
 		}
@@ -328,4 +283,82 @@ func (b *Bridge) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonResp(w, 200, resp)
 	}
+}
+
+// axSnapshot builds a snapshot from Accessibility.getFullAXTree (main frame).
+func (b *Bridge) axSnapshot(ctx context.Context, filter, selector string, maxDepth int) ([]A11yNode, map[string]int64, string, string, error) {
+	var rawResult json.RawMessage
+	if err := chromedp.Run(ctx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return chromedp.FromContext(ctx).Target.Execute(ctx,
+				"Accessibility.getFullAXTree", nil, &rawResult)
+		}),
+	); err != nil {
+		return nil, nil, "", "", fmt.Errorf("a11y tree: %w", err)
+	}
+
+	var treeResp struct {
+		Nodes []rawAXNode `json:"nodes"`
+	}
+	if err := json.Unmarshal(rawResult, &treeResp); err != nil {
+		return nil, nil, "", "", fmt.Errorf("parse a11y tree: %w", err)
+	}
+
+	// If a CSS selector is specified, scope the tree to that element's subtree.
+	if selector != "" {
+		var scopeNodeID int64
+		if err := chromedp.Run(ctx,
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				p := map[string]any{"nodeId": 0, "selector": selector}
+				var docResult json.RawMessage
+				if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.getDocument", map[string]any{"depth": 0}, &docResult); err != nil {
+					return fmt.Errorf("get document: %w", err)
+				}
+				var doc struct {
+					Root struct {
+						NodeID int64 `json:"nodeId"`
+					} `json:"root"`
+				}
+				if err := json.Unmarshal(docResult, &doc); err != nil {
+					return err
+				}
+				p["nodeId"] = doc.Root.NodeID
+				var qResult json.RawMessage
+				if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.querySelector", p, &qResult); err != nil {
+					return fmt.Errorf("querySelector: %w", err)
+				}
+				var qr struct {
+					NodeID int64 `json:"nodeId"`
+				}
+				if err := json.Unmarshal(qResult, &qr); err != nil {
+					return err
+				}
+				if qr.NodeID == 0 {
+					return fmt.Errorf("selector %q not found", selector)
+				}
+				var descResult json.RawMessage
+				if err := chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.describeNode", map[string]any{"nodeId": qr.NodeID}, &descResult); err != nil {
+					return fmt.Errorf("describe node: %w", err)
+				}
+				var desc struct {
+					Node struct {
+						BackendNodeID int64 `json:"backendNodeId"`
+					} `json:"node"`
+				}
+				if err := json.Unmarshal(descResult, &desc); err != nil {
+					return err
+				}
+				scopeNodeID = desc.Node.BackendNodeID
+				return nil
+			}),
+		); err != nil {
+			return nil, nil, "", "", fmt.Errorf("selector: %w", err)
+		}
+		treeResp.Nodes = filterSubtree(treeResp.Nodes, scopeNodeID)
+	}
+
+	flat, refs := buildSnapshot(treeResp.Nodes, filter, maxDepth)
+	var url, title string
+	_ = chromedp.Run(ctx, chromedp.Location(&url), chromedp.Title(&title))
+	return flat, refs, url, title, nil
 }

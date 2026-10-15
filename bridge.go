@@ -39,6 +39,7 @@ type Bridge struct {
 	actions       map[string]ActionFunc // cached action registry (built once)
 	locks         *lockManager
 	monitors      map[string]*tabMonitor       // network/console/dialog recorders per tab
+	refs          map[string]*frameRefs        // snapshot-engine worlds and frame indexes per tab
 	active        string                       // last tab used explicitly; default for calls without tabId
 	userAgent     string                       // headless UA without "Headless" ("" when headed)
 	uaMeta        *emulation.UserAgentMetadata // matching client hints
@@ -152,6 +153,7 @@ func (b *Bridge) CleanStaleTabs(ctx context.Context, interval time.Duration) {
 				delete(b.tabs, id)
 				delete(b.snapshots, id)
 				delete(b.monitors, id)
+				delete(b.refs, id)
 				slog.Info("cleaned stale tab", "id", id)
 			}
 		}
@@ -254,6 +256,7 @@ func (b *Bridge) CloseTab(tabID string) error {
 	delete(b.tabs, tabID)
 	delete(b.snapshots, tabID)
 	delete(b.monitors, tabID)
+	delete(b.refs, tabID)
 	if b.active == tabID {
 		b.active = ""
 	}

@@ -174,14 +174,26 @@ func (b *Bridge) initActionRegistry() {
 	b.registerExtraActions()
 }
 
-// resolveToRef maps the drag target ref to a backend node ID.
-func (b *Bridge) resolveToRef(tabID string, req *actionRequest) error {
-	if req.ToRef == "" || req.ToNodeID != 0 || req.ToSelector != "" {
-		return nil
+// resolveActionRefs turns ref/toRef into backend node IDs. When the element
+// lives in a child frame, the returned context carries that frame's offset so
+// coordinate-based input lands in the right place.
+func (b *Bridge) resolveActionRefs(ctx context.Context, tabID string, req *actionRequest) (context.Context, error) {
+	if req.Ref != "" && req.NodeID == 0 && req.Selector == "" {
+		nid, frameID, err := b.resolveRef(ctx, tabID, req.Ref)
+		if err != nil {
+			return ctx, err
+		}
+		req.NodeID = nid
+		ctx = withFrameOffset(ctx, tabID, frameID)
 	}
-	nid, err := b.resolveRef(tabID, req.ToRef)
-	req.ToNodeID = nid
-	return err
+	if req.ToRef != "" && req.ToNodeID == 0 && req.ToSelector == "" {
+		nid, _, err := b.resolveRef(ctx, tabID, req.ToRef)
+		if err != nil {
+			return ctx, err
+		}
+		req.ToNodeID = nid
+	}
+	return ctx, nil
 }
 
 func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -201,23 +213,9 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 	defer tCancel()
 	go cancelOnClientDone(r.Context(), tCancel)
 
-	// Resolve ref to backendNodeID from cached snapshot
-	if req.Ref != "" && req.NodeID == 0 && req.Selector == "" {
-		cache := b.GetRefCache(resolvedTabID)
-		if cache != nil {
-			if nid, ok := cache.refs[req.Ref]; ok {
-				req.NodeID = nid
-			}
-		}
-		if req.NodeID == 0 {
-			jsonResp(w, 400, map[string]string{
-				"error": fmt.Sprintf("ref %s not found - take a /snapshot first", req.Ref),
-			})
-			return
-		}
-	}
-
-	if err := b.resolveToRef(resolvedTabID, &req); err != nil {
+	// Resolve refs to backend node IDs (and the frame they live in).
+	actCtx, err := b.resolveActionRefs(tCtx, resolvedTabID, &req)
+	if err != nil {
 		jsonResp(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
@@ -245,7 +243,7 @@ func (b *Bridge) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(tCtx, req) })
+	result, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(actCtx, req) })
 	if err != nil {
 		jsonErr(w, 500, fmt.Errorf("action %s: %w", req.Kind, err))
 		return
@@ -309,28 +307,8 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 
 		tCtx, tCancel := context.WithTimeout(ctx, actionTimeout)
 
-		// Resolve ref
-		if action.Ref != "" && action.NodeID == 0 && action.Selector == "" {
-			cache := b.GetRefCache(resolvedTabID)
-			if cache != nil {
-				if nid, ok := cache.refs[action.Ref]; ok {
-					action.NodeID = nid
-				}
-			}
-			if action.NodeID == 0 {
-				tCancel()
-				results = append(results, actionResult{
-					Index: i, Success: false,
-					Error: fmt.Sprintf("ref %s not found - take a /snapshot first", action.Ref),
-				})
-				if req.StopOnError {
-					break
-				}
-				continue
-			}
-		}
-
-		if err := b.resolveToRef(resolvedTabID, &action); err != nil {
+		actCtx, err := b.resolveActionRefs(tCtx, resolvedTabID, &action)
+		if err != nil {
 			tCancel()
 			results = append(results, actionResult{Index: i, Success: false, Error: err.Error()})
 			if req.StopOnError {
@@ -367,7 +345,7 @@ func (b *Bridge) handleActions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		actionRes, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(tCtx, action) })
+		actionRes, err := runWatchingDialogs(b.Monitor(resolvedTabID), func() (map[string]any, error) { return fn(actCtx, action) })
 		tCancel()
 
 		if err != nil {

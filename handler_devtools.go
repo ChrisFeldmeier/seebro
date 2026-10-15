@@ -320,23 +320,36 @@ func (b *Bridge) handleWait(w http.ResponseWriter, r *http.Request) {
 	textJSON, _ := json.Marshal(req.Text)
 	selJSON, _ := json.Marshal(req.Selector)
 	urlJSON, _ := json.Marshal(req.URL)
-	// Returns the matched condition, or "" while still waiting.
-	js := fmt.Sprintf(`(() => {
-		const texts = %s, sel = %s, url = %s, gone = %t;
-		const body = document.body ? document.body.innerText : "";
-		let hit = "";
-		if (texts.length) {
-			const found = texts.find(t => body.includes(t));
-			if (gone ? !found : found) hit = gone ? "text gone" : found; else return "";
-		}
-		if (sel) {
-			const el = document.querySelector(sel);
-			if (gone ? !el : el) hit = hit || (gone ? "selector gone" : sel); else return "";
-		}
-		if (url) { if (location.href.includes(url)) hit = hit || location.href; else return ""; }
-		return hit || "ok";
-	})()`, textJSON, selJSON, urlJSON, req.Gone)
+	// check() returns the matched condition or "". The promise resolves on the
+	// first DOM mutation that satisfies it, or after waitMs with a final check.
+	checkJS := fmt.Sprintf(`const texts = %s, sel = %s, url = %s, gone = %t;
+		const check = () => {
+			const body = document.body ? document.body.innerText : "";
+			let hit = "";
+			if (texts.length) {
+				const found = texts.find(t => body.includes(t));
+				if (gone ? !found : found) hit = gone ? "text gone" : found; else return "";
+			}
+			if (sel) {
+				const el = document.querySelector(sel);
+				if (gone ? !el : el) hit = hit || (gone ? "selector gone" : sel); else return "";
+			}
+			if (url) { if (location.href.includes(url)) hit = hit || location.href; else return ""; }
+			return hit || "ok";
+		};`, textJSON, selJSON, urlJSON, req.Gone)
+	waitJS := func(ms int64) string {
+		return fmt.Sprintf(`(async () => { %s
+			const now = check(); if (now) return now;
+			return await new Promise(res => {
+				let t;
+				const mo = new MutationObserver(() => { const v = check(); if (v) { mo.disconnect(); clearTimeout(t); res(v); } });
+				mo.observe(document, {subtree: true, childList: true, characterData: true, attributes: true});
+				t = setTimeout(() => { mo.disconnect(); res(check()); }, %d);
+			});
+		})()`, checkJS, ms)
+	}
 	needJS := len(req.Text) > 0 || req.Selector != "" || req.URL != ""
+	fr := b.frameRefsFor(tabID)
 
 	start := time.Now()
 	deadline := start.Add(timeout)
@@ -344,10 +357,20 @@ func (b *Bridge) handleWait(w http.ResponseWriter, r *http.Request) {
 		matched := "networkIdle"
 		ok := true
 		if needJS {
+			step := min(time.Until(deadline), time.Second)
+			if req.NetworkIdle {
+				step = min(step, 200*time.Millisecond)
+			}
 			var res string
-			tCtx, tCancel := context.WithTimeout(ctx, 3*time.Second)
-			err := chromedp.Run(tCtx, chromedp.Evaluate(js, &res))
-			tCancel()
+			wid, err := b.world(ctx, fr, tabID, true)
+			if err == nil {
+				tCtx, tCancel := context.WithTimeout(ctx, step+2*time.Second)
+				err = callWorld(tCtx, wid, waitJS(max(step.Milliseconds(), 0)), &res)
+				tCancel()
+			}
+			if isContextGone(err) {
+				fr.forget(tabID) // navigated meanwhile: next round uses the new document
+			}
 			ok = err == nil && res != ""
 			matched = res
 		}
@@ -362,7 +385,9 @@ func (b *Bridge) handleWait(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, 408, fmt.Errorf("wait timed out after %s", timeout))
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		if !needJS || (req.NetworkIdle && !ok && matched != "") {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 }
 
@@ -620,17 +645,17 @@ func (b *Bridge) handleElement(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 404, err)
 		return
 	}
-	nodeID, err := b.resolveRef(tabID, q.Get("ref"))
-	if err != nil {
-		jsonErr(w, 400, err)
-		return
-	}
-	if nodeID == 0 && q.Get("selector") == "" {
+	if q.Get("ref") == "" && q.Get("selector") == "" {
 		jsonErr(w, 400, fmt.Errorf("need ref or selector"))
 		return
 	}
 	tCtx, tCancel := context.WithTimeout(ctx, actionTimeout)
 	defer tCancel()
+	nodeID, _, err := b.resolveRef(tCtx, tabID, q.Get("ref"))
+	if err != nil {
+		jsonErr(w, 400, err)
+		return
+	}
 
 	styles := q.Get("styles") // "", "true", "all"
 	var stylesArg any = false
@@ -647,19 +672,6 @@ func (b *Bridge) handleElement(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(res)
-}
-
-// resolveRef maps a snapshot ref to a backend node ID (0 if ref is empty).
-func (b *Bridge) resolveRef(tabID, ref string) (int64, error) {
-	if ref == "" {
-		return 0, nil
-	}
-	if cache := b.GetRefCache(tabID); cache != nil {
-		if nid, ok := cache.refs[ref]; ok {
-			return nid, nil
-		}
-	}
-	return 0, fmt.Errorf("ref %s not found - take a /snapshot first", ref)
 }
 
 // callOnTarget runs fn with `this` bound to the element (by backend node ID or

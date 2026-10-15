@@ -251,7 +251,8 @@ func center(ctx context.Context, nodeID int64, selector string, scroll bool) (fl
 	if err := json.Unmarshal(raw, &xy); err != nil {
 		return 0, 0, err
 	}
-	return xy[0], xy[1], nil
+	dx, dy := offsetFrom(ctx) // element inside a child frame
+	return xy[0] + dx, xy[1] + dy, nil
 }
 
 func mouseDrag(ctx context.Context, fx, fy, tx, ty float64) error {
