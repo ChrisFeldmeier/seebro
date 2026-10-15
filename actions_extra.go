@@ -52,7 +52,7 @@ func (b *Bridge) registerExtraActions() {
 		// HTML5 drag-and-drop (draggable=true) ignores synthetic mouse input,
 		// so dispatch DragEvents directly for those.
 		if req.ToNodeID != 0 || req.ToSelector != "" {
-			raw, err := callOnTarget(ctx, req.NodeID, req.Selector, `function() { return this.draggable === true; }`)
+			raw, err := callOnTarget(ctx, req.NodeID, req.Selector, `function() { return this.draggable === true || this.getAttribute("draggable") === "true"; }`)
 			if err == nil && string(raw) == "true" {
 				if err := html5Drag(ctx, req); err != nil {
 					return nil, err
@@ -293,8 +293,20 @@ func html5Drag(ctx context.Context, req actionRequest) error {
 		p := map[string]any{
 			"objectId": src,
 			"functionDeclaration": `function(dst) {
-				const dt = new DataTransfer();
-				const fire = (el, type) => el.dispatchEvent(new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer: dt}));
+				// DataTransfer/DragEvent may be missing or partial (non-Chrome engines).
+				let dt;
+				try { dt = new DataTransfer(); } catch (e) {
+					const data = {};
+					dt = {dropEffect: "move", effectAllowed: "all", types: [], files: [],
+						setData(k, v) { data[k] = String(v); if (!this.types.includes(k)) this.types.push(k); },
+						getData(k) { return data[k] || ""; }, clearData() {}, setDragImage() {}};
+				}
+				const fire = (el, type) => {
+					let ev;
+					try { ev = new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer: dt}); } catch (e) { ev = new Event(type, {bubbles: true, cancelable: true}); }
+					if (ev.dataTransfer !== dt) Object.defineProperty(ev, "dataTransfer", {value: dt});
+					return el.dispatchEvent(ev);
+				};
 				fire(this, "dragstart"); fire(dst, "dragenter"); fire(dst, "dragover"); fire(dst, "drop"); fire(this, "dragend");
 			}`,
 			"arguments": []any{map[string]any{"objectId": dst}},

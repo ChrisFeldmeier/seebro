@@ -131,7 +131,7 @@ func (b *Bridge) CloseIdleTabs(ctx context.Context, idle time.Duration) {
 				b.lastUsed[id] = now // first seen (e.g. popups): start the clock
 				continue
 			}
-			if id != b.initialTab && now.Sub(seen) > idle && b.locks.Get(id) == nil {
+			if id != b.initialTab && id != b.altInitial && now.Sub(seen) > idle && b.locks.Get(id) == nil {
 				stale = append(stale, t)
 			}
 		}

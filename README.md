@@ -79,6 +79,34 @@ Measured on the same machine against the previous release (Chrome 155, headless)
 | Full-page screenshot, Wikipedia (16,384 px) | timeout, tab hung for good | **673 ms** |
 | Text of Hacker News | lines glued together | correct line breaks |
 
+## Two Engines: Chrome and obscura (seebro-speed)
+
+Seebro can drive two browsers with the same API, MCP tools and refs:
+
+| | Chrome (default) | [obscura](https://github.com/h4ckf0r0day/obscura) |
+|---|---|---|
+| What it is | Google Chrome / Chromium | Rust headless browser (V8, own DOM/layout), Apache-2.0 |
+| Install | Chrome on the machine | `scripts/install-obscura.sh` (no Chrome needed) |
+| Memory, idle | 654 MB | **32 MB** |
+| Memory, 8 parallel shop flows | 1,869 MB | **251 MB** |
+| Small pages, 4 workers | 136 ops/s | **163 ops/s** |
+| Shop click-through, 1 / 4 / 8 workers | 155 / 345 / 425 flows/min | 153 / 334 / 328 flows/min |
+| Large page (25k elements), 4 workers | **38.5 ops/s** | 9.9 ops/s |
+| Mixed load, 8 workers | **92.8 ops/s** | 33.8 ops/s |
+| Real sites (navigate) | GitHub 2.4 s, Wikipedia 1.1 s | GitHub 14.8 s, Wikipedia 2.9 s |
+| iframes, JS dialogs, scrolling, WebSocket capture, metrics, contexts | yes | no |
+
+Measured with `scripts/loadtest.py` on a MacBook Pro (Intel Core i9-9980HK, 8 cores / 16 threads), local test site, 30–60 s per run, 0 errors in every run.
+
+**Rule of thumb:** obscura for many parallel, simple-to-medium pages where memory matters (scraping, reading, standard forms); Chrome for large or script-heavy pages, iframes, dialogs and anything visual. All obscura pages share one JavaScript thread, so throughput stops growing beyond ~4 parallel tabs; `BRIDGE_OBSCURA_WORKERS` adds processes but helps only a little (8-worker mixed load: 33.8 → 41.8 ops/s).
+
+```bash
+BRIDGE_ENGINE=obscura seebro                       # obscura only, no Chrome
+curl -X POST localhost:9867/tab -d '{"action":"new","url":"https://example.com","engine":"obscura"}'   # hybrid
+```
+
+MCP: `tab_new {url, engine: "obscura"}`. `health` lists the available engines.
+
 ## Binary Size & Footprint
 
 Release builds (`-ldflags "-s -w"`, as produced by goreleaser):
@@ -365,6 +393,11 @@ Environment variables (a config file at `~/.seebro/config.json` is also supporte
 | `BRIDGE_NO_ANIMATIONS` | `false` | Freeze CSS animations |
 | `BRIDGE_TIMEZONE` | – | Timezone for all tabs |
 | `BRIDGE_LOG_LEVEL` | `info` | `debug` also logs every successful request |
+| `BRIDGE_ENGINE` | `chrome` | `chrome`, `obscura` (no Chrome) or `auto` (Chrome if installed) |
+| `OBSCURA_BINARY` | – | Path to obscura (default: next to seebro, `~/.seebro/bin`, PATH) |
+| `BRIDGE_OBSCURA_WORKERS` | `1` | obscura worker processes |
+| `BRIDGE_OBSCURA_STEALTH` | `true` | obscura's own fingerprint + TLS impersonation |
+| `BRIDGE_OBSCURA_PRIVATE_NETWORK` | `true` | Let obscura open localhost/LAN URLs like Chrome does |
 | `CDP_URL` | – | Use an already running Chrome |
 | `CHROME_BINARY`, `CHROME_FLAGS` | – | Chrome path, extra flags |
 | `SEEBRO_URL` | `http://127.0.0.1:$BRIDGE_PORT` | Server used by `seebro mcp` |
@@ -445,6 +478,11 @@ cd seebro
 go build -o seebro .
 go test ./...                       # unit tests, no Chrome needed
 go test -tags integration ./...     # with a real headless Chrome
+
+# load test (see the script header for scenarios)
+python3 scripts/loadtest.py --write-site /tmp/seebro-site
+python3 -m http.server 8765 --bind 127.0.0.1 --directory /tmp/seebro-site &
+python3 scripts/loadtest.py --engine obscura --scenario flow --workers 4 --duration 60
 ```
 
 ## Contributors

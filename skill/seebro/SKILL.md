@@ -53,6 +53,15 @@ For infinite lists, repeat `scroll {tabId, y: 2000}` then `wait_for {networkIdle
 
 **4. Use the app's own export.** Click "Export CSV/PDF", then `downloads` lists the file and its path (`~/.seebro/downloads`). `save_pdf` prints the current page.
 
+## Choosing the engine
+
+Seebro can drive two browsers. Chrome is the default and supports everything. `tab_new {url, engine: "obscura"}` opens the tab in **obscura**, a lightweight Chrome-free engine:
+- good for: reading many simple or mid-size pages, scraping, click-through flows on regular sites — starts instantly, fast `get_text`/`snapshot` on small pages
+- not available on obscura tabs: iframes, JS dialogs (they are accepted silently), scrolling, WebSocket capture, performance metrics, isolated contexts, `viewport` filtering
+- very large or script-heavy pages are slower than in Chrome; if calls get slow or a feature is missing, reopen the URL with `engine: "chrome"`
+
+`health` shows which engines are available.
+
 ## Logging in
 
 - The profile at `~/.seebro/chrome-profile` keeps cookies. Check whether you are logged in first: `navigate`, then `get_text`.

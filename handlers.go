@@ -28,7 +28,20 @@ func (b *Bridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 200, map[string]any{"status": "disconnected", "error": err.Error(), "cdp": cdpURL})
 		return
 	}
-	jsonResp(w, 200, map[string]any{"status": "ok", "tabs": len(targets), "cdp": cdpURL})
+	engines := map[string]any{b.primary: "running"}
+	if b.primary == engineChrome {
+		switch {
+		case b.alt.browserCtx != nil:
+			engines[engineObscura] = "running"
+		case b.alt.err != nil:
+			engines[engineObscura] = "error: " + b.alt.err.Error()
+		default:
+			if _, err := findObscura(); err == nil {
+				engines[engineObscura] = "available (starts on first use)"
+			}
+		}
+	}
+	jsonResp(w, 200, map[string]any{"status": "ok", "tabs": len(targets), "cdp": cdpURL, "engine": b.primary, "engines": engines})
 }
 
 // ── GET /tabs ──────────────────────────────────────────────
@@ -51,6 +64,7 @@ func (b *Bridge) handleTabs(w http.ResponseWriter, r *http.Request) {
 		if name := b.contextName(t.BrowserContextID); name != "" {
 			entry["context"] = name
 		}
+		entry["engine"] = b.engineOf(string(t.TargetID))
 		if lock := b.locks.Get(string(t.TargetID)); lock != nil {
 			entry["owner"] = lock.Owner
 			entry["lockedUntil"] = lock.ExpiresAt.Format(time.RFC3339)
@@ -221,7 +235,7 @@ func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
 	defer tCancel()
 	go cancelOnClientDone(r.Context(), tCancel)
 
-	opts, _ := json.Marshal(map[string]string{"mode": mode})
+	opts, _ := json.Marshal(map[string]any{"mode": mode, "lite": b.engineOf(tabID) == engineObscura})
 	var res struct {
 		Text  string `json:"text"`
 		URL   string `json:"url"`
@@ -231,7 +245,7 @@ func (b *Bridge) handleText(w http.ResponseWriter, r *http.Request) {
 		b.failTab(w, tabID, fmt.Errorf("text extract: %w", err))
 		return
 	}
-	if mode != "raw" {
+	if mode != "raw" && b.engineOf(tabID) != engineObscura {
 		res.Text += b.crossOriginFrameText(tCtx, tabID, res.URL, string(opts))
 	}
 
@@ -283,6 +297,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 		BlockImages *bool   `json:"blockImages"` // per-request override; nil = use global BRIDGE_BLOCK_IMAGES
 		BlockMedia  *bool   `json:"blockMedia"`  // block images + fonts + CSS + video/audio
 		Context     string  `json:"context"`     // newTab only: open in this isolated context
+		Engine      string  `json:"engine"`      // newTab only: chrome or obscura
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
@@ -330,7 +345,7 @@ func (b *Bridge) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.NewTab {
-		newTargetID, newCtx, _, err := b.CreateTabInContext(req.Context, req.URL)
+		newTargetID, newCtx, _, err := b.openTab(req.Engine, req.Context, req.URL)
 		if err != nil {
 			jsonErr(w, 500, fmt.Errorf("new tab: %w", err))
 			return
@@ -463,6 +478,7 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 		TabID   string `json:"tabId"`
 		URL     string `json:"url"`
 		Context string `json:"context"` // new: open in this isolated context
+		Engine  string `json:"engine"`  // new: chrome or obscura
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
 		jsonErr(w, 400, fmt.Errorf("decode: %w", err))
@@ -471,7 +487,7 @@ func (b *Bridge) handleTab(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case tabActionNew:
-		newTargetID, ctx, _, err := b.CreateTabInContext(req.Context, req.URL)
+		newTargetID, ctx, _, err := b.openTab(req.Engine, req.Context, req.URL)
 		if err != nil {
 			jsonErr(w, 500, err)
 			return

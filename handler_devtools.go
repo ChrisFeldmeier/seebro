@@ -320,6 +320,9 @@ func (b *Bridge) handleWait(w http.ResponseWriter, r *http.Request) {
 	}
 	m := b.Monitor(tabID)
 
+	if req.Text == nil {
+		req.Text = []string{} // "null" would break texts.length in the page
+	}
 	textJSON, _ := json.Marshal(req.Text)
 	selJSON, _ := json.Marshal(req.Selector)
 	urlJSON, _ := json.Marshal(req.URL)
@@ -365,7 +368,11 @@ func (b *Bridge) handleWait(w http.ResponseWriter, r *http.Request) {
 				step = min(step, 200*time.Millisecond)
 			}
 			var res string
-			wid, err := b.world(ctx, fr, tabID, true, loaderOf(ctx, tabID))
+			loader := ""
+			if !fr.mainWorld {
+				loader = loaderOf(ctx, tabID) // main-world engines detect new documents themselves
+			}
+			wid, err := b.world(ctx, fr, tabID, true, loader)
 			if err == nil {
 				tCtx, tCancel := context.WithTimeout(ctx, step+2*time.Second)
 				err = callWorld(tCtx, wid, waitJS(max(step.Milliseconds(), 0)), &res)

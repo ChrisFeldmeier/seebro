@@ -46,13 +46,20 @@ type Bridge struct {
 	active        string                       // last tab used explicitly; default for calls without tabId
 	userAgent     string                       // headless UA without "Headless" ("" when headed)
 	uaMeta        *emulation.UserAgentMetadata // matching client hints
+	primary       string                       // engine of browserCtx: chrome or obscura
+	primaryProc   *obscuraProc                 // obscura sidecar when it is the primary engine
+	alt           altEngine                    // secondary obscura next to Chrome (lazy)
+	altInitial    string                       // initial tab of the secondary engine; never closed
+	tabEngine     map[string]string            // tabID → engine for tabs not on the primary engine
 	mu            sync.RWMutex
 }
 
 // injectStealth adds the stealth script to a tab context so it runs on every
 // new document load (including navigations).
 func (b *Bridge) injectStealth(ctx context.Context) {
-	if b.stealthScript == "" {
+	// obscura brings its own consistent fingerprint (TLS, UA, client hints);
+	// mixing in Chrome's would make it inconsistent.
+	if b.stealthScript == "" || engineFromCtx(ctx) == engineObscura {
 		return
 	}
 	if err := chromedp.Run(ctx,
@@ -92,7 +99,13 @@ func (b *Bridge) TabContext(tabID string) (context.Context, string, error) {
 		b.mu.RUnlock()
 		return entry.ctx, tabID, nil
 	}
+	_, known := b.tabEngine[tabID]
 	b.mu.RUnlock()
+	if !known && b.alt.browserCtx != nil {
+		b.altTargets() // tab may have been opened by a page in the secondary engine
+	}
+	browserCtx := b.browserFor(tabID)
+	engine := b.engineOf(tabID)
 
 	// Slow path: write lock, double-check
 	b.mu.Lock()
@@ -102,11 +115,11 @@ func (b *Bridge) TabContext(tabID string) (context.Context, string, error) {
 		return entry.ctx, tabID, nil
 	}
 
-	if b.browserCtx == nil {
+	if browserCtx == nil {
 		return nil, "", fmt.Errorf("no browser connection")
 	}
 
-	ctx, cancel := chromedp.NewContext(b.browserCtx,
+	ctx, cancel := chromedp.NewContext(withEngine(browserCtx, engine),
 		chromedp.WithTargetID(target.ID(tabID)),
 	)
 	if err := chromedp.Run(ctx); err != nil {
@@ -192,14 +205,40 @@ func (b *Bridge) CreateTab(url string) (string, context.Context, context.CancelF
 }
 
 func (b *Bridge) createTab(url string, opts ...chromedp.ContextOption) (string, context.Context, context.CancelFunc, error) {
-	if b.browserCtx == nil {
+	return b.createTabOn(b.primary, b.browserCtx, url, opts...)
+}
+
+// CreateTabOnEngine opens a tab in the given engine ("" = primary).
+func (b *Bridge) CreateTabOnEngine(engine, url string) (string, context.Context, context.CancelFunc, error) {
+	if engine == "" || engine == b.primary {
+		return b.CreateTab(url)
+	}
+	switch engine {
+	case engineObscura:
+		bctx, err := b.obscuraEngine()
+		if err != nil {
+			return "", nil, nil, err
+		}
+		return b.createTabOn(engineObscura, bctx, url)
+	case engineChrome:
+		return "", nil, nil, fmt.Errorf("the chrome engine is not running (BRIDGE_ENGINE=%s)", engineMode)
+	}
+	return "", nil, nil, fmt.Errorf("unknown engine %q (chrome or obscura)", engine)
+}
+
+func (b *Bridge) createTabOn(engine string, browserCtx context.Context, url string, opts ...chromedp.ContextOption) (string, context.Context, context.CancelFunc, error) {
+	if browserCtx == nil {
 		return "", nil, nil, fmt.Errorf("no browser context available")
 	}
-	ctx, cancel := chromedp.NewContext(b.browserCtx, opts...)
+	ctx, cancel := chromedp.NewContext(withEngine(browserCtx, engine), opts...)
 	mon := b.attachMonitor(ctx, "")
 
 	// Inject stealth script before navigation so it applies to the first page load
 	b.injectStealth(ctx)
+	if err := chromedp.Run(ctx); err != nil { // create the target (stealth injection may be skipped)
+		cancel()
+		return "", nil, nil, fmt.Errorf("new tab: %w", err)
+	}
 	if c := chromedp.FromContext(ctx); c != nil && c.Target != nil {
 		b.storeMonitor(string(c.Target.TargetID), mon)
 	}
@@ -229,6 +268,9 @@ func (b *Bridge) createTab(url string, opts ...chromedp.ContextOption) (string, 
 	b.mu.Lock()
 	b.tabs[newTargetID] = &TabEntry{ctx: ctx, cancel: cancel}
 	b.active = newTargetID
+	if engine != b.primary {
+		b.tabEngine[newTargetID] = engine
+	}
 	b.mu.Unlock()
 	b.markUsed(newTargetID)
 
@@ -248,7 +290,7 @@ func (b *Bridge) CloseTab(tabID string) error {
 	}
 
 	// Also send target.CloseTarget via the browser context for a clean CDP close.
-	closeCtx, closeCancel := context.WithTimeout(b.browserCtx, 5*time.Second)
+	closeCtx, closeCancel := context.WithTimeout(b.browserFor(tabID), 5*time.Second)
 	defer closeCancel()
 
 	// Use the CDP executor directly (not chromedp.Run) to avoid context issues.
@@ -266,6 +308,7 @@ func (b *Bridge) CloseTab(tabID string) error {
 	delete(b.snapshots, tabID)
 	delete(b.monitors, tabID)
 	delete(b.refs, tabID)
+	delete(b.tabEngine, tabID)
 	if b.active == tabID {
 		b.active = ""
 	}
@@ -315,5 +358,5 @@ func (b *Bridge) ListTargets() ([]*target.Info, error) {
 			pages = append(pages, t)
 		}
 	}
-	return pages, nil
+	return append(pages, b.altTargets()...), nil
 }

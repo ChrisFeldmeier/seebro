@@ -66,8 +66,21 @@ func main() {
 	var allocCancel context.CancelFunc
 	var chromeOpts []chromedp.ExecAllocatorOption // stored for retry
 
+	// Browser engine: Chrome (default), or obscura as a Chrome-free sidecar.
+	bridge.primary = primaryEngine()
+	bridge.tabEngine = make(map[string]string)
+	if bridge.primary == engineObscura && cdpURL == "" {
+		proc, err := startObscura()
+		if err != nil {
+			slog.Error("cannot start obscura", "err", err)
+			os.Exit(1)
+		}
+		bridge.primaryProc = proc
+		cdpURL = proc.ws
+	}
+
 	if cdpURL != "" {
-		slog.Info("connecting to Chrome", "url", cdpURL)
+		slog.Info("connecting to browser", "url", cdpURL, "engine", bridge.primary)
 		bridge.allocCtx, allocCancel = chromedp.NewRemoteAllocator(context.Background(), cdpURL)
 	} else {
 		if err := os.MkdirAll(profileDir, 0755); err != nil {
@@ -195,6 +208,10 @@ func main() {
 
 		errCh := make(chan error, 1)
 		go func() {
+			if bridge.primary == engineObscura {
+				errCh <- chromedp.Run(bCtx) // obscura brings its own stealth
+				return
+			}
 			errCh <- chromedp.Run(bCtx,
 				chromedp.ActionFunc(func(ctx context.Context) error {
 					_, err := page.AddScriptToEvaluateOnNewDocument(seededScript).Do(ctx)
@@ -241,6 +258,7 @@ func main() {
 				"profile", profileDir,
 			)
 			allocCancel()
+			bridge.shutdownEngines()
 			os.Exit(1)
 		}
 		slog.Info("Chrome started on retry")
@@ -260,8 +278,8 @@ func main() {
 		}
 	}
 
-	bridge.browserCtx = browserCtx
-	if headless {
+	bridge.browserCtx = withEngine(browserCtx, bridge.primary)
+	if headless && bridge.primary == engineChrome {
 		bridge.initUserAgent(browserCtx)
 		_ = chromedp.Run(browserCtx, bridge.userAgentAction())
 	}
@@ -272,7 +290,7 @@ func main() {
 
 	// Register the initial tab
 	initTargetID := chromedp.FromContext(browserCtx).Target.TargetID
-	bridge.tabs[string(initTargetID)] = &TabEntry{ctx: browserCtx}
+	bridge.tabs[string(initTargetID)] = &TabEntry{ctx: bridge.browserCtx}
 	bridge.initialTab = string(initTargetID)
 	bridge.attachMonitorLocked(browserCtx, string(initTargetID))
 	bridge.setupDownloads()
@@ -383,6 +401,7 @@ func main() {
 			// Explicitly close Chrome by canceling the browser and allocator contexts.
 			browserCancel()
 			allocCancel()
+			bridge.shutdownEngines()
 			slog.Info("chrome closed")
 		})
 	}
@@ -398,7 +417,7 @@ func main() {
 		doShutdown()
 	}()
 
-	slog.Info("🪼 Seebro ready", "addr", listenAddr(), "cdp", cdpURL, "stealth", stealthLevel)
+	slog.Info("🪼 Seebro ready", "addr", listenAddr(), "engine", bridge.primary, "cdp", cdpURL, "stealth", stealthLevel)
 	if token != "" {
 		slog.Info("auth enabled")
 	} else {

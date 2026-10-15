@@ -122,3 +122,14 @@ func TestDownloadsEndpoint(t *testing.T) {
 		t.Errorf("unexpected %s", w.Body.String())
 	}
 }
+
+func TestWaitRequest_SelectorOnlyEncodesEmptyTextList(t *testing.T) {
+	var w waitRequest
+	_ = json.Unmarshal([]byte(`{"selector":".card"}`), &w)
+	if w.Text == nil {
+		w.Text = []string{}
+	}
+	if b, _ := json.Marshal(w.Text); string(b) != "[]" {
+		t.Errorf("text list must encode as [], got %s", b)
+	}
+}

@@ -10,6 +10,12 @@
 (function () {
   if (globalThis.__sb) return;
 
+  // Lite mode (set per snapshot, used by engines where layout queries are
+  // expensive, e.g. obscura): textContent instead of innerText, no
+  // getBoundingClientRect/getComputedStyle.
+  let lite = false;
+  const textOf = (el) => (lite ? el.textContent : el.innerText) || el.textContent || "";
+
   const ids = new WeakMap();
   const els = new Map();
   let next = 1;
@@ -59,7 +65,7 @@
     const root = el.getRootNode();
     return ids.split(/\s+/).map((id) => {
       const n = root.getElementById ? root.getElementById(id) : el.ownerDocument.getElementById(id);
-      return n ? n.innerText || n.textContent : "";
+      return n ? textOf(n) : "";
     }).join(" ");
   }
 
@@ -90,7 +96,7 @@
     }
     if (!n && (tag === "TEXTAREA" || tag === "SELECT")) n = el.placeholder || el.title || "";
     if (!n && role !== "textbox" && role !== "combobox" && role !== "searchbox" && role !== "listbox") {
-      n = el.innerText || el.textContent || "";
+      n = textOf(el);
       if (!n.trim()) {
         const img = el.querySelector("img[alt]");
         const svgTitle = el.querySelector("svg title");
@@ -105,7 +111,12 @@
     const tag = el.tagName;
     if (tag === "SELECT") {
       // Array.from + filter instead of selectedOptions: not every DOM implements it.
-      return clean(Array.from(el.options || []).filter((o) => o.selected).map((o) => o.textContent).join(", "), 80);
+      const opts = Array.from(el.options || []);
+      let sel = opts.filter((o) => o.selected);
+      // A single-select always has a selection: the first option by default
+      // (some DOM implementations don't set .selected for it).
+      if (!sel.length && !el.multiple && opts.length) sel = [opts[0]];
+      return clean(sel.map((o) => o.textContent).join(", "), 80);
     }
     if (tag === "INPUT") {
       const t = (el.type || "").toLowerCase();
@@ -121,6 +132,11 @@
 
   function visibleRect(el) {
     if (el.checkVisibility && !el.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true })) return null;
+    if (lite) {
+      const st = el.getAttribute("style") || "";
+      if (/display\s*:\s*none|visibility\s*:\s*hidden/i.test(st)) return null;
+      return { x: 0, y: 0, width: 1, height: 1 }; // no layout: position unknown
+    }
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return null;
     return r;
@@ -146,7 +162,7 @@
   // cards). Only the outermost one is reported.
   function isClickable(el, parentPointer) {
     if (el.hasAttribute("onclick") || el.hasAttribute("ng-click") || el.hasAttribute("@click")) return true;
-    if (parentPointer) return false;
+    if (parentPointer || lite) return false;
     const tag = el.tagName;
     if (tag !== "DIV" && tag !== "SPAN" && tag !== "LI" && tag !== "IMG" && tag !== "TD" && tag !== "P" && tag !== "LABEL" && tag !== "svg") return false;
     return getComputedStyle(el).cursor === "pointer";
@@ -154,6 +170,7 @@
 
   function snapshot(opts) {
     opts = opts || {};
+    lite = !!opts.lite;
     if (opts.startId && next < opts.startId) next = opts.startId;
     const doc = document;
     const active = deepActive(doc);
@@ -229,5 +246,7 @@
     return e && e.isConnected ? e : null;
   }
 
-  globalThis.__sb = { snapshot, el };
+  // Non-enumerable: invisible to Object.keys(window) when the engine has to
+  // run in the page's main world (obscura).
+  Object.defineProperty(globalThis, "__sb", { value: { snapshot, el }, enumerable: false, configurable: true });
 })();

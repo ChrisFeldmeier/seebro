@@ -47,6 +47,11 @@ type ActionFunc func(ctx context.Context, req actionRequest) (map[string]any, er
 func (b *Bridge) initActionRegistry() {
 	b.actions = map[string]ActionFunc{
 		actionClick: func(ctx context.Context, req actionRequest) (map[string]any, error) {
+			if engineFromCtx(ctx) == engineObscura {
+				if handled, res, err := obscuraDownload(ctx, req.NodeID, req.Selector); handled || err != nil {
+					return res, err
+				}
+			}
 			var err error
 			if req.Selector != "" {
 				_, err = callOnTarget(ctx, 0, req.Selector, clickJS)

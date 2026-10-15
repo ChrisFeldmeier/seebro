@@ -58,6 +58,30 @@ state.go              Save/restore tabs (restore is off in headless by default)
 skill/seebro/         Claude skill and HTTP reference
 ```
 
+## Engines
+
+`BRIDGE_ENGINE` picks the primary browser: `chrome` (default), `obscura` or `auto` (Chrome if
+installed, else obscura). With Chrome as primary, tabs opened with `{"engine":"obscura"}` run in a
+second browser that Seebro starts on first use.
+
+obscura (Apache-2.0, https://github.com/h4ckf0r0day/obscura) is a Rust headless browser with its
+own DOM, V8 runtime, layout and CDP server. Seebro runs `obscura serve` as a sidecar on a free
+loopback port (binary from `OBSCURA_BINARY`, next to seebro, `~/.seebro/bin` or PATH; see
+`scripts/install-obscura.sh`) and drives it with the same chromedp code.
+
+Engine-specific behaviour (`obscura.go`, `engineOf`, `engineFromCtx`):
+- obscura tabs get no Chrome stealth script or UA override (obscura has its own consistent
+  fingerprint, including TLS).
+- The snapshot engine runs in the page's main world (non-enumerable `__sb`) in a single CDP call
+  with `lite` mode: `textContent` instead of `innerText`, no `getBoundingClientRect` /
+  `getComputedStyle`. In obscura those layout calls cost 6–13 ms per element and isolated worlds
+  are much slower to create.
+- `/text` uses a structural walker (`lite`) instead of `innerText`.
+- No frame-tree or box-model calls (obscura doesn't load iframes; box models force layout).
+- Clicks on `<a download>` are fetched inside the page and saved to the download folder.
+- All pages share one V8 thread in obscura: CDP calls wait while page scripts run, so latency on
+  script-heavy pages varies.
+
 ## Snapshots and refs
 
 Two engines produce the same `A11yNode` list and output formats:

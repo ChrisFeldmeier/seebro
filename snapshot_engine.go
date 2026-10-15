@@ -60,13 +60,14 @@ type jsSnapshot struct {
 
 // frameRefs is the per-tab bookkeeping for isolated worlds and frame indexes.
 type frameRefs struct {
-	mu      sync.Mutex
-	worlds  map[string]worldEntry // frameID → isolated world
-	index   map[string]int        // frameID → n in "f<n>"
-	frames  map[int]string        // n → frameID
-	nextIdx int
-	nextID  int64
-	snapped bool // a snapshot was taken at least once
+	mu        sync.Mutex
+	worlds    map[string]worldEntry // frameID → isolated world
+	index     map[string]int        // frameID → n in "f<n>"
+	frames    map[int]string        // n → frameID
+	nextIdx   int
+	nextID    int64
+	snapped   bool // a snapshot was taken at least once
+	mainWorld bool // run the engine in the page's main world (obscura: isolated worlds are slow there)
 }
 
 func (b *Bridge) frameRefsFor(tabID string) *frameRefs {
@@ -82,6 +83,7 @@ func (b *Bridge) frameRefsFor(tabID string) *frameRefs {
 			index:   map[string]int{tabID: 0},
 			frames:  map[int]string{0: tabID},
 			nextIdx: 1, nextID: 1,
+			mainWorld: b.tabEngine[tabID] == engineObscura || (b.primary == engineObscura && b.tabEngine[tabID] == ""),
 		}
 		b.refs[tabID] = fr
 	}
@@ -170,6 +172,13 @@ func (b *Bridge) world(ctx context.Context, fr *frameRefs, frameID string, creat
 		return 0, fmt.Errorf("page changed since the last snapshot")
 	}
 	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		if fr.mainWorld {
+			_, exc, e := runtime.Evaluate(snapshotJS).Do(ctx) // id 0 = main world
+			if e == nil && exc != nil {
+				e = fmt.Errorf("snapshot engine: %s", exceptionText(exc))
+			}
+			return e
+		}
 		var e error
 		id, e = page.CreateIsolatedWorld(cdp.FrameID(frameID)).WithWorldName("seebro").Do(ctx)
 		if e != nil {
@@ -199,7 +208,11 @@ func (fr *frameRefs) forget(frameID string) {
 // callWorld runs expr (an expression) in the frame's world and decodes the JSON result.
 func callWorld(ctx context.Context, worldID runtime.ExecutionContextID, expr string, out any) error {
 	return chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		res, exc, err := runtime.Evaluate(expr).WithContextID(worldID).WithReturnByValue(true).WithAwaitPromise(true).Do(ctx)
+		p := runtime.Evaluate(expr).WithReturnByValue(true).WithAwaitPromise(true)
+		if worldID != 0 {
+			p = p.WithContextID(worldID)
+		}
+		res, exc, err := p.Do(ctx)
 		if err != nil {
 			return err
 		}
@@ -224,6 +237,11 @@ type frameInfo struct {
 // their offsets. Frames in other processes (site isolation) are skipped.
 func (b *Bridge) frames(ctx context.Context, tabID string) []frameInfo {
 	out := []frameInfo{{id: tabID}}
+	if b.engineOf(tabID) == engineObscura {
+		// obscura doesn't load iframes, and box models force a full layout pass.
+		out[0].loader = loaderOf(ctx, tabID)
+		return out
+	}
 	var tree *page.FrameTree
 	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		var e error
@@ -272,11 +290,16 @@ type jsSnapshotOptions struct {
 	MaxNodes int    `json:"maxNodes,omitempty"`
 	Selector string `json:"selector,omitempty"`
 	StartID  int64  `json:"startId"`
+	Lite     bool   `json:"lite,omitempty"` // engines with expensive layout queries (obscura)
 }
 
 // jsSnapshot collects interactive elements from all frames of a tab.
 func (b *Bridge) jsSnapshot(ctx context.Context, tabID string, o jsSnapshotOptions) ([]A11yNode, string, string, int, error) {
 	fr := b.frameRefsFor(tabID)
+	o.Lite = b.engineOf(tabID) == engineObscura
+	if fr.mainWorld {
+		return b.mainWorldSnapshot(ctx, fr, tabID, o)
+	}
 	var all []A11yNode
 	url, title := "", ""
 	hidden := 0
@@ -378,7 +401,11 @@ func (b *Bridge) resolveRef(ctx context.Context, tabID, ref string) (int64, stri
 		}
 		var backend int64
 		err = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-			res, exc, err := runtime.Evaluate("__sb.el(" + m[2] + ")").WithContextID(wid).Do(ctx)
+			p := runtime.Evaluate("__sb.el(" + m[2] + ")")
+			if wid != 0 {
+				p = p.WithContextID(wid)
+			}
+			res, exc, err := p.Do(ctx)
 			if err != nil {
 				return err
 			}
@@ -447,4 +474,43 @@ func offsetFrom(ctx context.Context) (float64, float64) {
 		return v[0], v[1]
 	}
 	return 0, 0
+}
+
+// mainWorldSnapshot is the single-round-trip path for engines whose CDP calls
+// queue behind page JavaScript (obscura runs all pages on one V8 thread):
+// install the engine if missing and take the snapshot in one evaluate.
+func (b *Bridge) mainWorldSnapshot(ctx context.Context, fr *frameRefs, tabID string, o jsSnapshotOptions) ([]A11yNode, string, string, int, error) {
+	fr.mu.Lock()
+	o.StartID = fr.nextID
+	fr.mu.Unlock()
+	opts, _ := json.Marshal(o)
+	root := "null"
+	if o.Selector != "" {
+		sel, _ := json.Marshal(o.Selector)
+		root = "document.querySelector(" + string(sel) + ")"
+	}
+	expr := "(() => { if (!globalThis.__sb) {" + snapshotJS + "}\n const r = " + root +
+		"; return __sb.snapshot(Object.assign(" + string(opts) + ", r ? {root: r} : {})); })()"
+	var snap jsSnapshot
+	if err := callWorld(ctx, 0, expr, &snap); err != nil {
+		return nil, "", "", 0, err
+	}
+	fr.mu.Lock()
+	if snap.Next > fr.nextID {
+		fr.nextID = snap.Next
+	}
+	fr.snapped = true
+	fr.worlds[tabID] = worldEntry{id: 0} // refs resolve in the main world
+	fr.mu.Unlock()
+
+	all := make([]A11yNode, 0, len(snap.Nodes))
+	for _, n := range snap.Nodes {
+		all = append(all, A11yNode{
+			Ref: refName(0, n.ID), Role: n.Role, Name: n.Name, Value: n.Value,
+			Disabled: n.Disabled, Focused: n.Focused, Checked: n.Checked,
+			Expanded: n.Expanded, Collapsed: n.Collapsed, Required: n.Required,
+			Options: n.Options, Href: n.Href,
+		})
+	}
+	return all, snap.URL, snap.Title, 0, nil
 }
