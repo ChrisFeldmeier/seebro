@@ -54,6 +54,8 @@ stealth.js            Minimal stealth script (light) and fingerprint noise (full
 human.go              Human-like mouse paths and typing
 mcp.go                MCP JSON-RPC server, tool catalogue (in-process dispatch onto the API)
 mcp_stdio.go          `seebro mcp`: stdio proxy, server autostart, log rotation
+goal.go               `POST /goal`: goal-directed navigation loop, action space, local decider
+jev.go                Jev decision-model client (TypeSafe/OpenRouter), questions, filters, bot-wall detector
 state.go              Save/restore tabs (restore is off in headless by default)
 skill/seebro/         Claude skill and HTTP reference
 ```
@@ -168,6 +170,23 @@ Request → Logging → Guard (origin, Sec-Fetch-Site, host) → CORS (allowed o
 - File outputs (`path`, `saveTo`) may not write into hidden files/directories outside the state dir.
 - Tab locks: mutating calls on a locked tab need the owner (`X-Seebro-Owner`, sent per session by
   `seebro mcp`), otherwise 423.
+
+## Goal navigation (goal.go, jev.go)
+
+`POST /goal` runs a task as a loop. The loop drives the tab through the same mux as MCP
+(`apiBrowser`, in-process), so it uses the snapshot engine, actions, waits and recording unchanged.
+
+Per step: observe (interactive snapshot with links + 1,500 chars of page text) → build the action
+space (`buildActionSpace`) → ask the decider `action` (choice), `goal_done` and `stuck` (noul) in one
+call → stop gates → execute → `Settle` → observe again. The observation after an action is reused as
+the next step's view, so a step costs one snapshot. `Arm` marks the document with a `beforeunload`
+flag before acting; `Settle` waits while that flag says a navigation is starting, until the new URL
+has a non-loading document, or 400 ms of quiet when nothing navigates.
+
+The decider is an interface: `jevClient` (TypeSafe `/v1/systemone` or OpenRouter
+`/api/alpha/decisions`, retries on 408/409/429/5xx, answers validated before use) or `localDecider`
+(deterministic keyword walk). Tests drive the loop with a fake browser and scripted deciders.
+The design is ported from jev-browser (MIT).
 
 ## MCP
 

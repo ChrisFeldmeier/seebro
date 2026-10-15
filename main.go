@@ -371,6 +371,8 @@ func main() {
 	mux.HandleFunc("GET /contexts", bridge.handleContexts)
 	mux.HandleFunc("POST /context", bridge.handleContext)
 
+	mux.HandleFunc("POST /goal", bridge.handleGoal(mux))
+
 	// MCP endpoint: tools are dispatched in-process against the routes above.
 	mcpSrv := newMCPServer(&bridge, mux)
 	mux.HandleFunc("POST /mcp", mcpSrv.handleHTTP)

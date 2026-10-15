@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
   <img src="https://img.shields.io/badge/~9MB_binary-FFD700?style=flat-square" alt="~9MB"/>
   <img src="https://img.shields.io/badge/REST_API-00ff88?style=flat-square" alt="REST"/>
-  <img src="https://img.shields.io/badge/MCP-45_tools-7c3aed?style=flat-square" alt="MCP"/>
+  <img src="https://img.shields.io/badge/MCP-46_tools-7c3aed?style=flat-square" alt="MCP"/>
   <img src="https://img.shields.io/badge/MIT-888?style=flat-square" alt="MIT"/>
 </p>
 
@@ -43,6 +43,7 @@ claude mcp add seebro -- seebro mcp
 | **iframes** | Snapshots, text and actions reach into **iframes, including cross-origin** ones (payment forms, embedded logins, editors) |
 | **Interaction** | Click, double click, click at coordinates, type (fast `insertText`), fill (React/Vue-safe), whole forms in one call, keys and combos (`Enter`, `Control+A`), hover, select, scroll, drag & drop (HTML5 + mouse), file upload, human-like mouse and typing |
 | **Navigation** | Load URLs, back / forward / reload, `waitUntil` load / network idle, wait for text / element / URL (reacts instantly to DOM changes), multiple tabs |
+| **Goal navigation** | `POST /goal` / `navigate_goal`: a whole multi-step browsing task in **one call**, steered by the Jev decision model (or an offline matcher), with stop gates, recovery and a step trace |
 | **DevTools** | Network log with headers, POST data and response bodies, **WebSocket and Server-Sent Events**, console and uncaught exceptions, JS dialogs, **HAR export**, **performance metrics and Web Vitals** |
 | **Emulation** | Mobile viewports and touch, dark mode, reduced motion, geolocation, network and CPU throttling, user agent, extra headers, timezone, locale |
 | **Output** | Screenshots (JPEG/PNG/WebP; viewport, full page or element; auto-scaled for LLMs), **screen recording to MP4** with highlighted clicks, PDF export, downloads (CSV/PDF exports land in a known folder) |
@@ -52,7 +53,7 @@ claude mcp add seebro -- seebro mcp
 | **Robustness** | Hung or crashed tabs are detected and can be reset; idle tabs are closed automatically; JS dialogs never block a call |
 | **Stealth** | Passes common bot checks: no `webdriver` flag, no "HeadlessChrome" in user agent or client hints, real plugins, native-looking overrides, live self-check |
 | **Security** | Loopback by default, web pages can't reach the API (CSRF/DNS-rebinding guard), token enforced beyond loopback |
-| **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 45 tools), Claude skill |
+| **Agent integration** | HTTP API, MCP server (stdio + Streamable HTTP, 46 tools), Claude skill |
 
 ## How It Compares
 
@@ -106,6 +107,58 @@ curl -X POST localhost:9867/tab -d '{"action":"new","url":"https://example.com",
 ```
 
 MCP: `tab_new {url, engine: "obscura"}`. `health` lists the available engines.
+
+## Goal Navigation with Jev (seebro-speed)
+
+Normally an agent drives Seebro one call at a time: snapshot → think → click → wait → snapshot. Every hop costs a full round trip through a large model. `POST /goal` (MCP: `navigate_goal`) hands the whole navigation to a **small decision model** instead and returns when the goal is reached:
+
+```bash
+curl -X POST localhost:9867/goal -H "Authorization: Bearer $TOKEN" -d '{
+  "task": "Go from Coffee to Espresso, then to the Ristretto article",
+  "startUrl": "https://en.wikipedia.org/wiki/Coffee"
+}'
+# → {"status":"done","final_url":".../wiki/Ristretto","steps":[…],"usage":{"decider_calls":3,…}}
+```
+
+Each step:
+
+1. Seebro's snapshot engine lists the interactive elements; they become named options (`click_e73`, `search_e4`, `type_e9` / `submit_e9`, `select_e12`, plus `scroll_down`, `scroll_up`, `back`, `done`). Noise (edit links, citation markers, `javascript:`) and duplicate targets are dropped; when a page has more than 240 options, those that match the task survive the cap first.
+2. One decider call answers three independent questions: **which action?** (a probability per option), **is the goal reached?**, **are we stuck?**
+3. Stop gates run *before* acting (goal > 0.85, stuck > 0.85 after step 2, `done`). An action that had no visible effect and is proposed again is replaced by the next most probable one.
+4. Seebro executes the action, waits for the navigation or page update, and records the outcome in the history the decider sees next.
+
+The run stops on Cloudflare challenge or block pages (`status: "blocked"` with evidence and guidance) instead of clicking around on them.
+
+| Field | Meaning |
+|---|---|
+| `task` | What to achieve (required) |
+| `startUrl` | Navigate here first; otherwise start from the tab's current page |
+| `decider` | `jev` (default) or `local` (offline keyword matcher for simple link and search hops, no key) |
+| `maxSteps`, `maxSeconds` | Budgets (default 24 steps, 180 s) |
+| `query` | Text for search boxes (default: the task's keywords) |
+| `inputs` | `{"email": "a@b.c"}`: text for fields whose label contains the key. Without an entry nothing is typed into ordinary fields. |
+| `noTyping` | Only click, never type |
+| `record`, `recordPath` | Record the run as an MP4 |
+
+**Deciders.** `jev` uses TypeSafe's Jev model (~0.4 s and ~$0.0001 per step). Set one key in Seebro's environment:
+
+| Variable | |
+|---|---|
+| `TYPESAFE_API_KEY` | TypeSafe API (`TYPESAFE_BASE_URL` to override the endpoint) |
+| `OPENROUTER_API_KEY` | OpenRouter decisions API (`sk-or-…`) |
+| `JEV_PROVIDER`, `JEV_MODEL` | Force a provider; pick a model snapshot (default `jev-latest`) |
+
+**Measured** (Wikipedia, same decisions for every contestant, median of 3, same machine and Chrome):
+
+| Task | jev-browser (Playwright) | Seebro `/goal` | Seebro, step by step |
+|---|---|---|---|
+| Coffee → Espresso | 2,436 ms | **2,155 ms** | 2,288 ms |
+| Search "Ristretto" | 1,939 ms | **1,640 ms** | 1,610 ms |
+| Coffee → Espresso → Ristretto | 4,215 ms | **3,184 ms** | 2,652 ms |
+
+The browser side of `/goal` is 1.1–1.3× faster than jev-browser. The real gain is in the agent: a three-hop navigation is **one tool call** instead of about nine, and none of the intermediate pages pass through the large model's context.
+
+The loop design, the questions and the bot-wall detector are ported from [jev-browser](https://github.com/jkudish/jev-browser) (MIT, © Joey Kudish).
 
 ## Binary Size & Footprint
 
@@ -191,7 +244,7 @@ claude mcp add --transport http seebro http://localhost:9867/mcp \
 | Group | Tools |
 |---|---|
 | **Tabs** | `tabs_list`, `tab_new` (optionally in an isolated `context`), `tab_close`, `tab_focus`, `tab_reset`, `tab_lock`, `tab_unlock`, `contexts` |
-| **Navigate & read** | `navigate` (url / back / forward / reload, `waitUntil`), `get_text` (readability / markdown / raw, paged), `snapshot` (stable refs, `viewport`, `diff`, iframes), `screenshot`, `inspect_element`, `wait_for` |
+| **Navigate & read** | `navigate_goal` (whole task in one call), `navigate` (url / back / forward / reload, `waitUntil`), `get_text` (readability / markdown / raw, paged), `snapshot` (stable refs, `viewport`, `diff`, iframes), `screenshot`, `inspect_element`, `wait_for` |
 | **Input** | `click` (incl. double / human-like), `click_at`, `type_text` (with `submitKey`), `fill`, `fill_form`, `press_key`, `hover`, `select_option`, `scroll`, `drag`, `upload_file`, `batch_actions` |
 | **Scripting** | `evaluate` (awaits promises; `el => …` on a ref/selector) |
 | **Network & console** | `network_requests`, `network_request`, `websocket_messages`, `export_har`, `console_messages`, `clear_logs`, `handle_dialog` |
@@ -355,6 +408,7 @@ All endpoints accept `tabId`. Without it, the last tab used is taken. GET endpoi
 | `POST /emulate` | `viewport` (`390x844x3,mobile,touch`), `userAgent`, `colorScheme`, `reducedMotion`, `geolocation`, `network` (`Slow 3G` … `Offline`), `cpuThrottling`, `extraHeaders`, `timezone`, `locale` |
 | `GET /performance` | TTFB, FCP, LCP, CLS, load, plus JS heap, DOM nodes, layout counts |
 | `GET /pdf` | Print to PDF (`path`, `landscape`, `printBackground`) |
+| `POST /goal` | Run a multi-step navigation task with the Jev decision model or `decider: "local"`; returns status, final URL, step trace with confidences, usage (see [Goal Navigation](#goal-navigation-with-jev-seebro-speed)) |
 | `POST /screencast/start`, `POST /screencast/stop` | Record the tab as a real-time MP4 (needs ffmpeg); clicks and typing are highlighted while recording (`path`, `maxWidth`, `maxHeight`, `quality`) |
 | `GET /downloads` | Downloads and files in the download folder |
 | `GET /contexts`, `POST /context` | List isolated contexts; `close` one (and its tabs) |

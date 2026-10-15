@@ -16,6 +16,14 @@ Seebro depends on the following open-source packages. All are compatible with MI
 - **URL:** https://github.com/chromedp/cdproto
 - **Purpose:** Generated Go types for the Chrome DevTools Protocol
 
+## Ported Code
+
+### jkudish/jev-browser and @jkudish/jev-agent-tools
+- **License:** MIT
+- **Copyright:** (c) 2026 Joey Kudish
+- **URL:** https://github.com/jkudish/jev-browser
+- **Purpose:** The goal-navigation loop (`goal.go`), the Jev wire client, step questions, action-space filters and Cloudflare detector (`jev.go`) are Go ports of this project's TypeScript
+
 ## Transitive Dependencies
 
 ### chromedp/sysutil

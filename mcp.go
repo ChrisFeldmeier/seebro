@@ -452,6 +452,17 @@ func mcpTools() []mcpTool {
 			})), Annotations: sideEffects, run: postTool("/screencast/start", nil)},
 		{Name: "screencast_stop", Description: "Stop recording and write the MP4 (real-time, needs ffmpeg). Returns the file path.",
 			InputSchema: obj(withTab(map[string]any{})), Annotations: sideEffects, run: postTool("/screencast/stop", nil)},
+		{Name: "navigate_goal", Description: "Run a whole browsing task autonomously in one call: each step snapshots the page, a small decision model (Jev via TYPESAFE_API_KEY/OPENROUTER_API_KEY, or decider=local offline) picks the action and watches for goal reached / stuck, and Seebro executes it. Returns status (goal_achieved, done, stuck, max_steps, max_seconds, blocked, error), the final URL and a step trace with confidences. Use for navigation (find a page, follow links, search); read the result page yourself afterwards. Text is only typed into search boxes (query) and fields named in inputs.",
+			InputSchema: obj(withTab(map[string]any{
+				"task":       pStr("What to achieve, e.g. \"Find the Ristretto article on Wikipedia\""),
+				"startUrl":   pStr("Navigate here first (default: start from the current page)"),
+				"decider":    pEnum("jev (default; needs a Jev key) or local (offline keyword matcher)", "jev", "local"),
+				"maxSteps":   pNum("Step budget (default 24)"),
+				"maxSeconds": pNum("Time budget in seconds (default 180)"),
+				"query":      pStr("Text for search boxes (default: the task's keywords)"),
+				"inputs":     map[string]any{"type": "object", "description": "Field label substring → text to type, e.g. {\"email\": \"a@b.c\"}; \"*\" matches any field", "additionalProperties": map[string]any{"type": "string"}},
+				"record":     pBool("Record the run as an MP4 (needs ffmpeg); the path is returned as video"),
+			}), "task"), Annotations: sideEffects, run: postTool("/goal", nil)},
 		{Name: "inspect_element", Description: "Details of one element: tag, attributes, text, value, bounding box, visibility; optionally outerHTML and computed styles.",
 			InputSchema: obj(withTarget(map[string]any{
 				"html":   pBool("Include outerHTML (max 20KB)"),

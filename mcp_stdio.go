@@ -28,7 +28,7 @@ var mcpOwner = envOr("SEEBRO_OWNER", fmt.Sprintf("mcp-%d", os.Getpid()))
 
 func runMCPStdio() {
 	base := strings.TrimRight(envOr("SEEBRO_URL", "http://127.0.0.1:"+port), "/")
-	client := &http.Client{Timeout: 3 * time.Minute}
+	client := &http.Client{Timeout: 16 * time.Minute} // navigate_goal may run up to 15 min
 	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "seebro mcp: "+format+"\n", a...) }
 
 	if err := ensureServer(base, logf); err != nil {
